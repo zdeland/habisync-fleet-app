@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   CartesianGrid,
@@ -15,6 +15,8 @@ import {
 } from 'recharts';
 import { reconstructStateAt, resolveConfigAt, type DeviceTimelineData, type ReconstructedState } from '@/lib/timeline';
 import type { Device, LogLevel, LogRow, LogTag, ProfileConfig } from '@/lib/types';
+import { celsiusDeltaToFahrenheit, celsiusToFahrenheit, tempRangeC } from '@/lib/units';
+import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
 import type { Preset } from '@/app/devices/[deviceId]/page';
 
 // Recharts needs literal colors for SVG stroke/fill — can't take Tailwind
@@ -70,6 +72,16 @@ function reasonOnly(message: string) {
   return match ? match[1] : message;
 }
 
+// The device dashboard's /climate-test page drives the real
+// ClimateController and real outlets — it's not a sandbox — so a
+// test-triggered transition logs through the exact same tag='event' path
+// as a real one. The only distinguishing signal is this "test: " prefix
+// on the reason (see docs/known-issues.md); render it distinctly so it's
+// never mistaken for a real climate-triggered decision.
+function isTestReason(reason: string) {
+  return reasonOnly(reason).trim().toLowerCase().startsWith('test:');
+}
+
 // Colors the reason badge by what triggered the transition — reuses the
 // same cool/alert/good palette as the gauges so "temperature below target
 // range" reads as the same blue as a TOO COLD badge, not an unrelated hue.
@@ -113,6 +125,7 @@ const TAG_ICONS: Partial<Record<LogTag, string>> = {
 // row's own timestamp) but day/night and automation toggles don't
 // correspond to one outlet, so fall back to a simple keyword match.
 function iconForLog(row: LogRow, device: Device, configLogs: LogRow[]) {
+  if (isTestReason(row.message)) return '🧪';
   if (row.tag === 'event') {
     if (row.outlet_index != null) {
       const { outletRoles } = resolveConfigAt(configLogs, device, row.created_at);
@@ -189,6 +202,23 @@ function Gauge({ value, min, max, zones }: { value: number | null; min: number; 
   );
 }
 
+// The real automation (docs/automation-rules.md §3-5) has different
+// ON->OFF and OFF->ON thresholds — the "low"/"high" gauge zone lines are
+// where a trigger *starts*, not where it releases. Passing the real
+// outlet's reported on/off state lets these agree with what the device
+// is actually doing while latched in that band, instead of the badge
+// flipping to "IN RANGE" the instant the raw reading crosses the
+// trigger line while the outlet (correctly) hasn't released yet.
+function isBelowActive(value: number, low: number, hysteresis: number, outletOn: boolean | null): boolean {
+  if (value < low) return true;
+  return Boolean(outletOn) && value < low + hysteresis;
+}
+
+function isAboveActive(value: number, high: number, hysteresis: number, outletOn: boolean | null): boolean {
+  if (value >= high) return true;
+  return Boolean(outletOn) && value >= high - hysteresis;
+}
+
 // One gauge + value readout + in-range badge, for either temp or humidity.
 function GaugeColumn({
   label,
@@ -199,6 +229,9 @@ function GaugeColumn({
   lowLabel,
   highLabel,
   lowColor,
+  hysteresis,
+  belowOutletOn,
+  aboveOutletOn,
   automationEnabled,
   controlStatus,
 }: {
@@ -210,6 +243,9 @@ function GaugeColumn({
   lowLabel: string;
   highLabel: string;
   lowColor: typeof GAUGE_COLORS.cool;
+  hysteresis: number;
+  belowOutletOn: boolean | null;
+  aboveOutletOn: boolean | null;
   automationEnabled: boolean | null;
   controlStatus: { dotClassName: string; label: string };
 }) {
@@ -228,9 +264,9 @@ function GaugeColumn({
     badge = { className: GAUGE_COLORS.neutral.className, label: automationEnabled === false ? 'AUTOMATION DISABLED' : 'NO TARGET' };
   } else if (value == null) {
     badge = { className: GAUGE_COLORS.neutral.className, label: 'NO DATA' };
-  } else if (value < low) {
+  } else if (isBelowActive(value, low, hysteresis, belowOutletOn)) {
     badge = { className: lowColor.className, label: lowLabel };
-  } else if (value > high) {
+  } else if (isAboveActive(value, high, hysteresis, aboveOutletOn)) {
     badge = { className: GAUGE_COLORS.alert.className, label: highLabel };
   } else {
     badge = { className: GAUGE_COLORS.good.className, label: 'IN RANGE' };
@@ -320,8 +356,8 @@ function deriveTempStatus(state: ReconstructedState): { dotClassName: string; la
   }
 
   const fan = state.outlets.find((outlet) => outlet.role === 'Fan');
-  const tempHigh = state.config.profileConfig?.temp_high_f;
-  if (fan?.on && tempHigh != null && state.tempF != null && state.tempF > tempHigh) {
+  const range = tempRangeC(state.config.profileConfig);
+  if (range != null && state.tempC != null && isAboveActive(state.tempC, range.high, TEMP_HYSTERESIS_C, fan?.on ?? null)) {
     return { dotClassName: 'bg-device-alert', label: 'TOO HOT — fan ON' };
   }
 
@@ -343,7 +379,7 @@ function deriveHumidityStatus(state: ReconstructedState): { dotClassName: string
 
   const fan = state.outlets.find((outlet) => outlet.role === 'Fan');
   const humHigh = state.config.profileConfig?.hum_high;
-  if (fan?.on && humHigh != null && state.hum != null && state.hum > humHigh) {
+  if (humHigh != null && state.hum != null && isAboveActive(state.hum, humHigh, HUMIDITY_HYSTERESIS_PCT, fan?.on ?? null)) {
     return { dotClassName: 'bg-device-alert', label: 'TOO HUMID — fan ON' };
   }
 
@@ -364,6 +400,27 @@ export default function DeviceTimeline({
   const fromMs = new Date(range.from).getTime();
   const toMs = new Date(range.to).getTime();
   const [scrubMs, setScrubMs] = useState(toMs);
+
+  // AutoRefresh (see the device timeline page) re-fetches fresh server data
+  // every 20s on a rolling preset, which advances `toMs` to a later "now" —
+  // but scrubMs only gets set once at mount, so without this the panel
+  // would keep showing whatever instant it opened on forever, even though
+  // the chart/event log behind it are genuinely live. Only follow `toMs`
+  // forward when the scrubber was sitting at the previous live edge; once
+  // the user drags it elsewhere, respect that and stop auto-advancing.
+  const prevToMsRef = useRef(toMs);
+  useEffect(() => {
+    if (toMs !== prevToMsRef.current) {
+      // Capture as a primitive before mutating the ref below — the updater
+      // callback runs later, during React's commit, by which point the ref
+      // itself would already read the NEW toMs if referenced directly
+      // inside the closure, making this comparison always false and the
+      // scrubber never actually advance.
+      const previousToMs = prevToMsRef.current;
+      setScrubMs((current) => (current === previousToMs ? toMs : current));
+      prevToMsRef.current = toMs;
+    }
+  }, [toMs]);
 
   // Same rows as the marker strip below (data.allLogs, any tag) so the
   // prev/next buttons step between exactly what's plotted there.
@@ -404,7 +461,12 @@ export default function DeviceTimeline({
   }, [eventTimestamps, scrubMs]);
 
   const chartData = useMemo(
-    () => data.telemetry.map((row) => ({ t: new Date(row.created_at).getTime(), tempF: row.temp_f, hum: row.hum })),
+    () =>
+      data.telemetry.map((row) => ({
+        t: new Date(row.created_at).getTime(),
+        tempF: celsiusToFahrenheit(row.temp_c),
+        hum: row.hum,
+      })),
     [data.telemetry],
   );
 
@@ -481,22 +543,23 @@ export default function DeviceTimeline({
                   contentStyle={{ background: CHART_COLORS.tooltipBg, border: 'none', fontSize: 12 }}
                   labelStyle={{ color: '#eee' }}
                 />
-                {segments.map(
-                  (segment, i) =>
-                    segment.config.profileConfig && (
-                      <ReferenceArea
-                        key={`temp-band-${i}`}
-                        yAxisId="temp"
-                        x1={segment.start}
-                        x2={segment.end}
-                        y1={segment.config.profileConfig.temp_low_f}
-                        y2={segment.config.profileConfig.temp_high_f}
-                        fill={CHART_COLORS.tempBand}
-                        fillOpacity={0.1}
-                        stroke="none"
-                      />
-                    ),
-                )}
+                {segments.map((segment, i) => {
+                  const range = tempRangeC(segment.config.profileConfig);
+                  if (!range) return null;
+                  return (
+                    <ReferenceArea
+                      key={`temp-band-${i}`}
+                      yAxisId="temp"
+                      x1={segment.start}
+                      x2={segment.end}
+                      y1={celsiusToFahrenheit(range.low)}
+                      y2={celsiusToFahrenheit(range.high)}
+                      fill={CHART_COLORS.tempBand}
+                      fillOpacity={0.1}
+                      stroke="none"
+                    />
+                  );
+                })}
                 <Line
                   yAxisId="temp"
                   type="stepAfter"
@@ -571,6 +634,11 @@ export default function DeviceTimeline({
 }
 
 function ContextPanel({ state }: { state: ReconstructedState }) {
+  const tempRange = tempRangeC(state.config.profileConfig);
+  const heater = state.outlets.find((outlet) => outlet.role === 'Heater');
+  const mister = state.outlets.find((outlet) => outlet.role === 'Mister');
+  const fan = state.outlets.find((outlet) => outlet.role === 'Fan');
+
   return (
     <section className="rounded-2xl bg-device-screen p-6 shadow-device">
       <h2 className="mb-4 text-[1.1em] text-device-text">State at {formatTime(new Date(state.timestamp).getTime())}</h2>
@@ -586,13 +654,16 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
         <ProfileSummary profileConfig={state.config.profileConfig} />
         <GaugeColumn
           label="Current Temperature"
-          value={state.tempF}
+          value={state.tempC != null ? celsiusToFahrenheit(state.tempC) : null}
           unit="°F"
-          low={state.config.profileConfig?.temp_low_f}
-          high={state.config.profileConfig?.temp_high_f}
+          low={tempRange ? celsiusToFahrenheit(tempRange.low) : undefined}
+          high={tempRange ? celsiusToFahrenheit(tempRange.high) : undefined}
           lowLabel="TOO COLD"
           highLabel="TOO HOT"
           lowColor={GAUGE_COLORS.cool}
+          hysteresis={celsiusDeltaToFahrenheit(TEMP_HYSTERESIS_C)}
+          belowOutletOn={heater?.on ?? null}
+          aboveOutletOn={fan?.on ?? null}
           automationEnabled={state.automationEnabled}
           controlStatus={deriveTempStatus(state)}
         />
@@ -605,6 +676,9 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
           lowLabel="TOO DRY"
           highLabel="TOO HUMID"
           lowColor={GAUGE_COLORS.dry}
+          hysteresis={HUMIDITY_HYSTERESIS_PCT}
+          belowOutletOn={mister?.on ?? null}
+          aboveOutletOn={fan?.on ?? null}
           automationEnabled={state.automationEnabled}
           controlStatus={deriveHumidityStatus(state)}
         />
@@ -630,15 +704,23 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
             >
               {outlet.on == null ? 'unknown' : outlet.on ? 'ON' : 'OFF'}
             </p>
-            {outlet.reason && (
-              <div
-                className={`rounded px-2 py-0.5 text-center text-[0.65em] font-mono text-device-screen ${
-                  reasonBadgeColor(outlet.reason).className
-                }`}
-              >
-                {reasonOnly(outlet.reason)}
-              </div>
-            )}
+            {outlet.reason &&
+              (isTestReason(outlet.reason) ? (
+                <div
+                  title="Triggered by the device's /climate-test page, not a real sensor reading"
+                  className="rounded bg-device-disabled px-2 py-0.5 text-center text-[0.65em] font-mono text-device-screen"
+                >
+                  🧪 TEST
+                </div>
+              ) : (
+                <div
+                  className={`rounded px-2 py-0.5 text-center text-[0.65em] font-mono text-device-screen ${
+                    reasonBadgeColor(outlet.reason).className
+                  }`}
+                >
+                  {reasonOnly(outlet.reason)}
+                </div>
+              ))}
             {outlet.since && (
               <p className="text-center text-[0.7em] text-device-text-tertiary">
                 since {displayTime(outlet.since, outlet.sinceDeviceTime)}
@@ -666,24 +748,38 @@ function EventLog({ data }: { data: DeviceTimelineData }) {
         </div>
       ) : (
         <div className="flex max-h-[420px] flex-col gap-2.5 overflow-y-auto">
-          {newestFirst.map((row) => (
-            <div key={row.id} className="flex items-center gap-3 rounded-lg bg-device-surface px-3 py-2.5">
-              <div className="w-[26px] flex-shrink-0 text-center text-[1.3em]">
-                {iconForLog(row, data.device, data.configLogs)}
-              </div>
-              <div className="w-[130px] flex-shrink-0 text-[0.8em] text-device-text-tertiary">
-                {displayTime(row.created_at, row.device_time)}
-              </div>
-              <div className="flex-1 text-[0.92em] text-device-text">
-                {row.message}
-                {row.temp_f != null && row.hum != null && (
-                  <div className="mt-0.5 text-[0.75em] text-device-text-tertiary">
-                    {row.temp_f.toFixed(1)}°F / {row.hum.toFixed(1)}% RH
+          {newestFirst.map((row) => {
+            const isTest = isTestReason(row.message);
+            return (
+              <div key={row.id} className="flex items-center gap-3 rounded-lg bg-device-surface px-3 py-2.5">
+                <div className="w-[26px] flex-shrink-0 text-center text-[1.3em]">
+                  {iconForLog(row, data.device, data.configLogs)}
+                </div>
+                <div className="w-[130px] flex-shrink-0 text-[0.8em] text-device-text-tertiary">
+                  {displayTime(row.created_at, row.device_time)}
+                </div>
+                <div className="flex-1 text-[0.92em] text-device-text">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span>{row.message}</span>
+                    {isTest && (
+                      <span
+                        title="Triggered by the device's /climate-test page — a real outlet change, but not driven by an actual sensor reading"
+                        className="rounded bg-device-disabled px-1.5 py-0.5 text-[0.65em] font-mono text-device-screen"
+                      >
+                        TEST
+                      </span>
+                    )}
                   </div>
-                )}
+                  {row.temp_c != null && row.hum != null && (
+                    <div className="mt-0.5 text-[0.75em] text-device-text-tertiary">
+                      {celsiusToFahrenheit(row.temp_c).toFixed(1)}°F / {row.hum.toFixed(1)}% RH
+                      {isTest && ' (real reading — not what drove this test)'}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </section>

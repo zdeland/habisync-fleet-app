@@ -6,7 +6,9 @@ Generated from [`src/CloudLog.cpp`](../src/CloudLog.cpp) and
 [`scripts/supabase_schema.sql`](../scripts/supabase_schema.sql); see also the
 [README's Cloud Logging section](../README.md#cloud-logging-remote-debugging).
 
-firmware `0.3.0` · backend: Supabase / PostgREST
+firmware `0.3.0` (payload shapes below reflect the `temp_f`→`temp_c` rename
+that shipped in `0.5.0` — see [`known-issues.md`](known-issues.md) for the
+historical mixed-unit caveat this creates) · backend: Supabase / PostgREST
 
 ## Sending
 
@@ -94,7 +96,7 @@ timeline reconstruction can read directly instead of parsing prose:
   "message": "Fan [3] turned ON — humidity at safety ceiling",
   "uptime_ms": 1234567,
   "device_time": "2026-07-17T20:06:01Z",   // null until NTP syncs
-  "temp_f": 88.5,                          // null unless this entry
+  "temp_c": 31.4,                          // null unless this entry
   "hum": 62.3,                             // has a snapshot
   "outlet_index": 3,                       // null on non-outlet log rows
   "outlet_state": true,                    // null on non-outlet log rows
@@ -116,7 +118,7 @@ side channel described above rather than through the normal log queue:
   "message": "settings saved",
   "uptime_ms": 1234600,
   "device_time": "2026-07-17T20:07:15Z",
-  "temp_f": null,
+  "temp_c": null,
   "hum": null,
   "outlet_index": null,
   "outlet_state": null,
@@ -135,7 +137,7 @@ timestamp answers "what were this device's settings as of time T," which
 ```json
 {
   "device_id": "hs-2b93f4",
-  "temp_f": 88.5,
+  "temp_c": 31.4,
   "hum": 62.3,
   "outlet_mask": 25,        // bit i set → outlet i is on (25 = 0b00011001)
   "free_heap": 187344,
@@ -162,8 +164,8 @@ Sampled alongside `logHistory()`, every 60s.
   "profile_config": {
     "profile": "Leopard Gecko",
     "enabled": true,
-    "temp_low_f": 75.2,
-    "temp_high_f": 89.6,
+    "temp_low_c": 24.0,
+    "temp_high_c": 32.0,
     "hum_low": 30,
     "hum_high": 50,
     "day_light_on": "08:00",

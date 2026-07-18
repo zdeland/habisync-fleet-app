@@ -1,0 +1,50 @@
+{
+  "_comment": "Golden vectors for ClimateController::evaluate() (src/Reptile.cpp). Single source of truth for both this repo's native test (test/test_climate) and the fleet webapp's reimplementation — see docs/automation-rules.md. All temp/hum values are Celsius/%RH, matching ClimateController's native units (and, since the wire-format change in CHANGELOG.md, what Supabase now stores). Each scenario replays its steps in order through ONE ClimateController instance — hysteresis is stateful, steps are not independent.",
+  "scenarios": [
+    {
+      "name": "heater hysteresis + safety ceiling",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 23.0, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "below tempLow -> heat on" },
+        { "temp": 24.5, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "above tempLow but inside hysteresis band -> stays on" },
+        { "temp": 25.0, "hum": 35.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "reaches tempLow + 1.0 -> turns off" },
+        { "temp": 32.0, "hum": 35.0, "expect": { "heat": false, "mist": false, "fan": true,  "tooHot": true,  "tooHumid": false }, "note": "safety ceiling reached; fan reacts too" },
+        { "temp": 23.0, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "back below tempLow -> heat on again, fan releases" },
+        { "temp": 33.0, "hum": 35.0, "expect": { "heat": false, "mist": false, "fan": true,  "tooHot": true,  "tooHumid": false }, "note": "ceiling forces heat off immediately, no hysteresis on the way up" }
+      ]
+    },
+    {
+      "name": "mister hysteresis + safety ceiling",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 28.0, "hum": 25.0, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "below humidityLow -> mist on" },
+        { "temp": 28.0, "hum": 32.0, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "inside hysteresis band -> stays on" },
+        { "temp": 28.0, "hum": 33.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "reaches humidityLow + 3.0 -> turns off" },
+        { "temp": 28.0, "hum": 40.0, "expect": { "heat": false, "mist": false, "fan": true,  "tooHot": false, "tooHumid": true  }, "note": "safety ceiling reached" },
+        { "temp": 28.0, "hum": 25.0, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "back below humidityLow -> mist on again, fan releases" },
+        { "temp": 28.0, "hum": 41.0, "expect": { "heat": false, "mist": false, "fan": true,  "tooHot": false, "tooHumid": true  }, "note": "ceiling forces mist off immediately" }
+      ]
+    },
+    {
+      "name": "fan OR logic across independent triggers",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 33.0, "hum": 25.0, "expect": { "heat": false, "mist": true,  "fan": true,  "tooHot": true,  "tooHumid": false }, "note": "temperature-only trigger" },
+        { "temp": 33.0, "hum": 41.0, "expect": { "heat": false, "mist": false, "fan": true,  "tooHot": true,  "tooHumid": true  }, "note": "humidity ceiling also hit -> both triggers active; this is the exact seam that caused the stale fan-reason bug fixed in firmware 0.4.1 (see CHANGELOG.md) - the fan itself doesn't flip here, only its cause changes" },
+        { "temp": 20.0, "hum": 41.0, "expect": { "heat": true,  "mist": false, "fan": true,  "tooHot": false, "tooHumid": true  }, "note": "temp trigger releases, fan stays on for humidity alone" },
+        { "temp": 20.0, "hum": 30.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "humidity trigger releases too -> fan off" }
+      ]
+    },
+    {
+      "name": "disabled automation is a no-op",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": false,
+      "steps": [
+        { "temp": 10.0, "hum": 90.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluate() returns immediately when disabled, regardless of how extreme the reading is" }
+      ]
+    }
+  ]
+}

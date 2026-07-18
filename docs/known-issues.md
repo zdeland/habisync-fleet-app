@@ -101,3 +101,54 @@ instead of the publishable key. That would fix this specific read gap but
 creates a much worse one — a secret key has full, RLS-bypassing database
 access, and firmware is far easier to physically extract from a device than
 a Supabase project URL is to find. Never ship a secret key to a device.
+
+**Update, same day**: this grant regressed a second time when the firmware
+repo's Celsius migration SQL was run against the live project — that
+migration script re-applies `scripts/supabase_schema.sql`'s baseline
+grants, which don't yet include this fix (it was only ever applied ad hoc
+via the SQL editor, never captured back into the tracked schema file).
+Re-ran `grant select on public.devices to anon;` to unblock the device
+again. **Whoever owns `scripts/supabase_schema.sql` should add this grant
+into that file directly** so the next unrelated schema change doesn't
+silently revert it a third time.
+
+## The `/climate-test` page ships real automation data, not sandboxed test data
+
+**Status as of 2026-07-18: known, handled in the UI, no further action planned.**
+
+### What
+
+The on-device dashboard's `/climate-test` page (gauge-drag UI) isn't a
+simulation — `handleClimateTestRun()` in the firmware's `src/main.cpp`
+feeds a fake temp/humidity reading straight into the live
+`ClimateController` and the real `applyOutletState()`, the same code path
+a real sensor reading takes. Using it on a device actually flips that
+device's real Heat/Mister/Fan outlets, and logs a normal `tag='event'` row
+through the same path any real automation decision would use.
+
+The only distinguishing signal is the logged `message` being prefixed
+`"test: "` (e.g. `"Heater [1] turned ON — test: temperature below target
+range"`). The row's `temp_c`/`hum` columns are the device's **real**
+sensor reading at that instant — `logEvent()` always logs live globals,
+not the fake value that actually drove the decision — so recomputing
+"should heat be on" from `temp_c` for one of these rows can legitimately
+disagree with what `outlet_index`/`outlet_state` shows. That's expected
+for a test-driven row, not a bug or a webapp/firmware drift.
+
+**Telemetry has no marker at all.** A `telemetry.outlet_mask` sample taken
+within ~60s after a `"test: "`-tagged `logs` row may reflect the
+test-driven outlet state with no way to distinguish it from a real one.
+
+### What the webapp does about it
+
+- `DeviceTimeline.tsx`'s outlet-reason badge and the event log both check
+  for the `"test: "` prefix (`isTestReason()`) and render a distinct
+  neutral "TEST" tag instead of the normal color-coded reason, so a
+  test-triggered transition is never mistaken for a real climate decision
+  while debugging.
+- **Not yet needed, but will matter once built**: any future
+  hysteresis/anomaly-detection feature (plan doc item 8) must exclude
+  `"test: "`-prefixed `logs` rows before comparing actual vs. expected
+  outlet state, and should treat `telemetry` samples in the ~60s window
+  after one as suspect rather than trying to filter them precisely, since
+  there's no marker on the telemetry row itself.

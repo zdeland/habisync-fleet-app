@@ -34,6 +34,17 @@ export async function getDeviceTimelineData(
   // further; deferred for this first pass.
   const ROW_LIMIT = 20_000;
 
+  // Ordering these DESCENDING (not ascending) is deliberate, not cosmetic:
+  // a Supabase project's configured max-rows setting silently caps a
+  // query's returned rows well below ROW_LIMIT with no error at all — the
+  // .limit() in code is a ceiling, not a guarantee. Ordering ascending and
+  // hitting that cap would silently return only the OLDEST rows in range,
+  // cutting off before "now" (this is exactly what was happening: the
+  // device timeline showed a telemetry sample hours stale while the fleet
+  // overview — whose own query already orders descending — was fresh).
+  // Fetch newest-first so a silent cap keeps the recent end instead, then
+  // reverse back to ascending below since the rest of this module and the
+  // reducer assume chronological order.
   const [
     { data: telemetryInRange, error: telemetryError },
     { data: seedTelemetry, error: seedTelemetryError },
@@ -46,7 +57,7 @@ export async function getDeviceTimelineData(
       .eq('device_id', deviceId)
       .gte('created_at', range.from)
       .lte('created_at', range.to)
-      .order('created_at', { ascending: true })
+      .order('created_at', { ascending: false })
       .limit(ROW_LIMIT),
     supabase
       .from('telemetry')
@@ -61,7 +72,7 @@ export async function getDeviceTimelineData(
       .eq('device_id', deviceId)
       .gte('created_at', range.from)
       .lte('created_at', range.to)
-      .order('created_at', { ascending: true })
+      .order('created_at', { ascending: false })
       .limit(ROW_LIMIT),
     supabase
       .from('logs')
@@ -78,8 +89,8 @@ export async function getDeviceTimelineData(
   if (logsError) throw logsError;
   if (seedConfigError) throw seedConfigError;
 
-  const telemetry = [...(seedTelemetry ?? []), ...(telemetryInRange ?? [])];
-  const allLogs = logsInRange ?? [];
+  const telemetry = [...(seedTelemetry ?? []), ...(telemetryInRange ?? []).reverse()];
+  const allLogs = (logsInRange ?? []).reverse();
   const events = allLogs.filter((row) => row.tag === 'event');
   const configLogs = [...(seedConfig ?? []), ...allLogs.filter((row) => row.tag === 'config')];
 
@@ -119,7 +130,7 @@ export type OutletState = {
 
 export type ReconstructedState = {
   timestamp: string;
-  tempF: number | null;
+  tempC: number | null; // native unit as of firmware 0.5.0 — see src/lib/units.ts
   hum: number | null;
   telemetryAt: string | null; // timestamp of the base telemetry sample used
   outlets: OutletState[];
@@ -178,7 +189,7 @@ export function reconstructStateAt(data: DeviceTimelineData, t: string): Reconst
 
   return {
     timestamp: t,
-    tempF: baseTelemetry?.temp_f ?? null,
+    tempC: baseTelemetry?.temp_c ?? null,
     hum: baseTelemetry?.hum ?? null,
     telemetryAt: baseTelemetry?.created_at ?? null,
     outlets,

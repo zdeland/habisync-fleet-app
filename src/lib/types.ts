@@ -20,11 +20,21 @@ export type LogTag =
   | 'cloudlog'
   | 'config';
 
+// Firmware 0.5.0 switched the wire format from Fahrenheit to Celsius
+// (temp_low_f/temp_high_f -> temp_low_c/temp_high_c — see
+// docs/known-issues.md). profile_config is a JSONB blob that only gets
+// rewritten when a device resaves its settings, so a snapshot saved before
+// that firmware update keeps the old _f keys forever, even though the
+// underlying logs/telemetry table columns have all been renamed+converted.
+// Both shapes are optional here on purpose — read via src/lib/units.ts's
+// tempRangeC(), never these fields directly.
 export type ProfileConfig = {
   profile: string;
   enabled: boolean;
-  temp_low_f: number;
-  temp_high_f: number;
+  temp_low_c?: number;
+  temp_high_c?: number;
+  temp_low_f?: number;
+  temp_high_f?: number;
   hum_low: number;
   hum_high: number;
   day_light_on: string;
@@ -61,7 +71,7 @@ export type LogRow = {
   uptime_ms: number;
   device_time: string | null;
   created_at: string;
-  temp_f: number | null;
+  temp_c: number | null; // renamed from temp_f in firmware 0.5.0 — native Celsius
   hum: number | null;
   outlet_index: number | null;
   outlet_state: boolean | null;
@@ -73,7 +83,7 @@ export type TelemetryRow = {
   id: number;
   device_id: string;
   created_at: string;
-  temp_f: number;
+  temp_c: number; // renamed from temp_f in firmware 0.5.0 — native Celsius
   hum: number;
   outlet_mask: number;
   free_heap: number;

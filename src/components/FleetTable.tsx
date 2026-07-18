@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { DeviceHealth } from '@/lib/queries';
+import { celsiusToFahrenheit } from '@/lib/units';
 
 // Mirrors the on-device "status check" component (dot + mono one-liner),
 // repurposed here for fleet-level health per docs/style-guide.md §8.
@@ -68,7 +69,7 @@ export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
                 <td className="px-4 py-3 text-device-text-secondary">{entry.device.active_backend}</td>
                 <td className="px-4 py-3 text-device-text-secondary">
                   {entry.latestTelemetry
-                    ? `${entry.latestTelemetry.temp_f.toFixed(1)}°F / ${entry.latestTelemetry.hum}%`
+                    ? `${celsiusToFahrenheit(entry.latestTelemetry.temp_c).toFixed(1)}°F / ${entry.latestTelemetry.hum}%`
                     : '—'}
                 </td>
                 <td className="px-4 py-3">

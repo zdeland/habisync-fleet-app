@@ -46,11 +46,13 @@ first — they're the ground truth for what ships and when. Summary:
   (boot/wifi/kasa/ota/sensor/event/cloudlog), free-text `message`,
   `uptime_ms`, `device_time` (null until the device's NTP-synced —
   `created_at` is the reliable server timestamp, always present), and
-  `temp_f`/`hum` populated only on `tag='event'` rows (outlet/automation/
+  `temp_c`/`hum` populated only on `tag='event'` rows (outlet/automation/
   day-night transitions, via the firmware's `logEvent()` hook). 60-day
-  retention.
+  retention. (`temp_c` was `temp_f` before firmware `0.5.0` — see
+  [`known-issues.md`](known-issues.md) for the historical mixed-unit
+  caveat this creates.)
 - **`telemetry`** — append-only, one row roughly every 60s per device:
-  `temp_f`, `hum`, `outlet_mask` (bitfield, bit *i* = outlet *i*'s on/off
+  `temp_c`, `hum`, `outlet_mask` (bitfield, bit *i* = outlet *i*'s on/off
   state), `free_heap`, `rssi`. 30-day retention.
 
 **Auth:** the on-device anon key is insert-only (plus upsert on `devices`)
@@ -178,7 +180,7 @@ parsing as a fallback), same as if this fix hadn't been made.
 For a device + time range `[t0, t1]`:
 
 1. Fetch `telemetry` rows in range, ordered by `created_at` asc — these are
-   full, authoritative snapshots (temp_f, hum, outlet_mask, free_heap,
+   full, authoritative snapshots (temp_c, hum, outlet_mask, free_heap,
    rssi) roughly every 60s. This is the backbone.
 2. Fetch `logs` rows in range, ordered by `created_at` asc — finer-grained
    events between telemetry samples, plus non-outlet context (WiFi, boot,
