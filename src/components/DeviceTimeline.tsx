@@ -14,7 +14,7 @@ import {
   YAxis,
 } from 'recharts';
 import { reconstructStateAt, resolveConfigAt, type DeviceTimelineData, type ReconstructedState } from '@/lib/timeline';
-import type { LogLevel } from '@/lib/types';
+import type { Device, LogLevel, LogRow, LogTag } from '@/lib/types';
 import type { Preset } from '@/app/devices/[deviceId]/page';
 
 // Recharts needs literal colors for SVG stroke/fill — can't take Tailwind
@@ -72,6 +72,38 @@ const ROLE_ICONS: Record<string, string> = {
 // Unassigned/custom outlet roles (a raw Kasa alias) fall back to a plug icon.
 function iconForRole(role: string) {
   return ROLE_ICONS[role] ?? '🔌';
+}
+
+// Non-outlet tags per docs/style-guide.md's nav-tile icons where they exist
+// (ota -> Firmware Update, sensor -> Climate Setup, cloudlog -> Cloud
+// Logging); the rest are reasonable extensions of the same language.
+const TAG_ICONS: Partial<Record<LogTag, string>> = {
+  boot: '🔁',
+  wifi: '📶',
+  kasa: '🔌',
+  ota: '⬆️',
+  sensor: '🌡️',
+  cloudlog: '☁️',
+  config: '⚙️',
+};
+
+// tag='event' rows carry outlet_index for outlet transitions (use the
+// role's own icon, resolved against whatever config was active at that
+// row's own timestamp) but day/night and automation toggles don't
+// correspond to one outlet, so fall back to a simple keyword match.
+function iconForLog(row: LogRow, device: Device, configLogs: LogRow[]) {
+  if (row.tag === 'event') {
+    if (row.outlet_index != null) {
+      const { outletRoles } = resolveConfigAt(configLogs, device, row.created_at);
+      return iconForRole(outletRoles[row.outlet_index] ?? '');
+    }
+    const message = row.message.toLowerCase();
+    if (message.includes('night')) return '🌙';
+    if (message.includes('day')) return '☀️';
+    if (message.includes('automation')) return '⚙️';
+    return '🔔';
+  }
+  return TAG_ICONS[row.tag] ?? '🔔';
 }
 
 // Mirrors the on-device status-box's four states (disabled/heating/too hot/
@@ -255,6 +287,7 @@ export default function DeviceTimeline({
       </section>
 
       <ContextPanel state={state} />
+      <EventLog data={data} />
     </div>
   );
 }
@@ -328,6 +361,45 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
           Last event ({displayTime(state.lastEvent.created_at, state.lastEvent.device_time)}):{' '}
           {state.lastEvent.message}
         </p>
+      )}
+    </section>
+  );
+}
+
+// docs/style-guide.md §9 — event-row list, newest first for the whole
+// selected range (not just up to the scrub position, unlike ContextPanel).
+function EventLog({ data }: { data: DeviceTimelineData }) {
+  const newestFirst = useMemo(() => [...data.allLogs].reverse(), [data.allLogs]);
+
+  return (
+    <section className="rounded-2xl bg-device-card p-6 shadow-device">
+      <h2 className="mb-4 text-[1.1em] text-device-text">Event log</h2>
+
+      {newestFirst.length === 0 ? (
+        <div className="rounded-xl bg-device-surface p-8 text-sm text-device-text-secondary">
+          No events in this range.
+        </div>
+      ) : (
+        <div className="flex max-h-[420px] flex-col gap-2.5 overflow-y-auto">
+          {newestFirst.map((row) => (
+            <div key={row.id} className="flex items-center gap-3 rounded-lg bg-device-surface px-3 py-2.5">
+              <div className="w-[26px] flex-shrink-0 text-center text-[1.3em]">
+                {iconForLog(row, data.device, data.configLogs)}
+              </div>
+              <div className="w-[130px] flex-shrink-0 text-[0.8em] text-device-text-tertiary">
+                {displayTime(row.created_at, row.device_time)}
+              </div>
+              <div className="flex-1 text-[0.92em] text-device-text">
+                {row.message}
+                {row.temp_f != null && row.hum != null && (
+                  <div className="mt-0.5 text-[0.75em] text-device-text-tertiary">
+                    {row.temp_f.toFixed(1)}°F / {row.hum.toFixed(1)}% RH
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
       )}
     </section>
   );
