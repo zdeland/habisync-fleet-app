@@ -143,12 +143,39 @@ function iconForLog(row: LogRow, device: Device, configLogs: LogRow[]) {
 // Zone/badge colors as both a literal hex (for the gauge's SVG arcs, which
 // can't take Tailwind classes) and the matching Tailwind class (for the
 // badge below it) — kept as one pair per role so the two never drift apart.
+// `className` (solid fill) still backs the gauge zone colors' Tailwind
+// equivalent and the small status dots; `badgeClassName` is the outline
+// style — border + tinted background + colored text reads better than
+// white-on-color at these small badge sizes, especially against the dark
+// gray "disabled" color where solid-fill white text had poor contrast.
+// Full literal strings (not built via interpolation) since Tailwind's
+// scanner needs to see the complete class name in source to generate it.
 const GAUGE_COLORS = {
-  cool: { hex: '#4299E1', className: 'bg-device-cool' }, // temp below target
-  dry: { hex: '#C05621', className: 'bg-device-dry' }, // humidity below target
-  good: { hex: '#48BB78', className: 'bg-device-good' },
-  alert: { hex: '#F56565', className: 'bg-device-alert' },
-  neutral: { hex: '#333', className: 'bg-device-disabled' },
+  cool: {
+    hex: '#4299E1', // temp below target
+    className: 'bg-device-cool',
+    badgeClassName: 'border border-device-cool/40 bg-device-cool/10 text-device-cool',
+  },
+  dry: {
+    hex: '#C05621', // humidity below target
+    className: 'bg-device-dry',
+    badgeClassName: 'border border-device-dry/40 bg-device-dry/10 text-device-dry',
+  },
+  good: {
+    hex: '#48BB78',
+    className: 'bg-device-good',
+    badgeClassName: 'border border-device-good/40 bg-device-good/10 text-device-good',
+  },
+  alert: {
+    hex: '#F56565',
+    className: 'bg-device-alert',
+    badgeClassName: 'border border-device-alert/40 bg-device-alert/10 text-device-alert',
+  },
+  neutral: {
+    hex: '#333',
+    className: 'bg-device-disabled',
+    badgeClassName: 'border border-device-disabled/40 bg-device-disabled/10 text-device-disabled',
+  },
 };
 
 // docs/style-guide.md §6 — hand-drawn semicircle gauge, viewBox 0 0 200 120,
@@ -214,11 +241,6 @@ function isBelowActive(value: number, low: number, hysteresis: number, outletOn:
   return Boolean(outletOn) && value < low + hysteresis;
 }
 
-function isAboveActive(value: number, high: number, hysteresis: number, outletOn: boolean | null): boolean {
-  if (value >= high) return true;
-  return Boolean(outletOn) && value >= high - hysteresis;
-}
-
 // One gauge + value readout + in-range badge, for either temp or humidity.
 function GaugeColumn({
   label,
@@ -231,7 +253,7 @@ function GaugeColumn({
   lowColor,
   hysteresis,
   belowOutletOn,
-  aboveOutletOn,
+  aboveActive,
   automationEnabled,
   controlStatus,
 }: {
@@ -245,7 +267,12 @@ function GaugeColumn({
   lowColor: typeof GAUGE_COLORS.cool;
   hysteresis: number;
   belowOutletOn: boolean | null;
-  aboveOutletOn: boolean | null;
+  // Real recomputed Fan trigger (state.tooHot/tooHumid from the reducer),
+  // not derived from raw value vs. threshold here — Fan is shared between
+  // temp and humidity, so "value is in the hysteresis band" alone can't
+  // tell you which cause is actually active (see the tooHot/tooHumid doc
+  // comment on ReconstructedState).
+  aboveActive: boolean | null;
   automationEnabled: boolean | null;
   controlStatus: { dotClassName: string; label: string };
 }) {
@@ -261,15 +288,15 @@ function GaugeColumn({
 
   let badge: { className: string; label: string };
   if (!hasTarget) {
-    badge = { className: GAUGE_COLORS.neutral.className, label: automationEnabled === false ? 'AUTOMATION DISABLED' : 'NO TARGET' };
+    badge = { className: GAUGE_COLORS.neutral.badgeClassName, label: automationEnabled === false ? 'AUTOMATION DISABLED' : 'NO TARGET' };
   } else if (value == null) {
-    badge = { className: GAUGE_COLORS.neutral.className, label: 'NO DATA' };
+    badge = { className: GAUGE_COLORS.neutral.badgeClassName, label: 'NO DATA' };
   } else if (isBelowActive(value, low, hysteresis, belowOutletOn)) {
-    badge = { className: lowColor.className, label: lowLabel };
-  } else if (isAboveActive(value, high, hysteresis, aboveOutletOn)) {
-    badge = { className: GAUGE_COLORS.alert.className, label: highLabel };
+    badge = { className: lowColor.badgeClassName, label: lowLabel };
+  } else if (aboveActive) {
+    badge = { className: GAUGE_COLORS.alert.badgeClassName, label: highLabel };
   } else {
-    badge = { className: GAUGE_COLORS.good.className, label: 'IN RANGE' };
+    badge = { className: GAUGE_COLORS.good.badgeClassName, label: 'IN RANGE' };
   }
 
   return (
@@ -281,7 +308,7 @@ function GaugeColumn({
         </div>
       </div>
       <p className="mt-1 text-[0.9em] text-device-text-secondary">{label}</p>
-      <div className={`mt-2 rounded-full px-3 py-1 font-mono text-[0.7em] text-device-screen ${badge.className}`}>
+      <div className={`mt-2 rounded-full px-3 py-1 font-mono text-[0.75em] font-semibold ${badge.className}`}>
         {badge.label}
       </div>
       {hasTarget && (
@@ -355,9 +382,7 @@ function deriveTempStatus(state: ReconstructedState): { dotClassName: string; la
     return { dotClassName: 'bg-device-heating', label: 'HEATING — heat outlet ON' };
   }
 
-  const fan = state.outlets.find((outlet) => outlet.role === 'Fan');
-  const range = tempRangeC(state.config.profileConfig);
-  if (range != null && state.tempC != null && isAboveActive(state.tempC, range.high, TEMP_HYSTERESIS_C, fan?.on ?? null)) {
+  if (state.tooHot) {
     return { dotClassName: 'bg-device-alert', label: 'TOO HOT — fan ON' };
   }
 
@@ -377,9 +402,7 @@ function deriveHumidityStatus(state: ReconstructedState): { dotClassName: string
     return { dotClassName: 'bg-device-heating', label: 'MISTING — mister ON' };
   }
 
-  const fan = state.outlets.find((outlet) => outlet.role === 'Fan');
-  const humHigh = state.config.profileConfig?.hum_high;
-  if (humHigh != null && state.hum != null && isAboveActive(state.hum, humHigh, HUMIDITY_HYSTERESIS_PCT, fan?.on ?? null)) {
+  if (state.tooHumid) {
     return { dotClassName: 'bg-device-alert', label: 'TOO HUMID — fan ON' };
   }
 
@@ -637,7 +660,6 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
   const tempRange = tempRangeC(state.config.profileConfig);
   const heater = state.outlets.find((outlet) => outlet.role === 'Heater');
   const mister = state.outlets.find((outlet) => outlet.role === 'Mister');
-  const fan = state.outlets.find((outlet) => outlet.role === 'Fan');
 
   return (
     <section className="rounded-2xl bg-device-screen p-6 shadow-device">
@@ -663,7 +685,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
           lowColor={GAUGE_COLORS.cool}
           hysteresis={celsiusDeltaToFahrenheit(TEMP_HYSTERESIS_C)}
           belowOutletOn={heater?.on ?? null}
-          aboveOutletOn={fan?.on ?? null}
+          aboveActive={state.tooHot}
           automationEnabled={state.automationEnabled}
           controlStatus={deriveTempStatus(state)}
         />
@@ -678,7 +700,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
           lowColor={GAUGE_COLORS.dry}
           hysteresis={HUMIDITY_HYSTERESIS_PCT}
           belowOutletOn={mister?.on ?? null}
-          aboveOutletOn={fan?.on ?? null}
+          aboveActive={state.tooHumid}
           automationEnabled={state.automationEnabled}
           controlStatus={deriveHumidityStatus(state)}
         />
@@ -697,25 +719,18 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
               </div>
             </div>
             <p className="text-center text-[0.8em] text-device-text-secondary">{outlet.role}</p>
-            <p
-              className={`text-center text-[0.75em] font-medium ${
-                outlet.on ? 'text-device-good' : 'text-device-text-tertiary'
-              }`}
-            >
-              {outlet.on == null ? 'unknown' : outlet.on ? 'ON' : 'OFF'}
-            </p>
             {outlet.reason &&
               (isTestReason(outlet.reason) ? (
                 <div
                   title="Triggered by the device's /climate-test page, not a real sensor reading"
-                  className="rounded bg-device-disabled px-2 py-0.5 text-center text-[0.65em] font-mono text-device-screen"
+                  className={`rounded px-2 py-0.5 text-center text-[0.7em] font-mono font-semibold ${GAUGE_COLORS.neutral.badgeClassName}`}
                 >
                   🧪 TEST
                 </div>
               ) : (
                 <div
-                  className={`rounded px-2 py-0.5 text-center text-[0.65em] font-mono text-device-screen ${
-                    reasonBadgeColor(outlet.reason).className
+                  className={`rounded px-2 py-0.5 text-center text-[0.7em] font-mono font-semibold ${
+                    reasonBadgeColor(outlet.reason).badgeClassName
                   }`}
                 >
                   {reasonOnly(outlet.reason)}
@@ -764,7 +779,7 @@ function EventLog({ data }: { data: DeviceTimelineData }) {
                     {isTest && (
                       <span
                         title="Triggered by the device's /climate-test page — a real outlet change, but not driven by an actual sensor reading"
-                        className="rounded bg-device-disabled px-1.5 py-0.5 text-[0.65em] font-mono text-device-screen"
+                        className={`rounded px-1.5 py-0.5 text-[0.7em] font-mono font-semibold ${GAUGE_COLORS.neutral.badgeClassName}`}
                       >
                         TEST
                       </span>

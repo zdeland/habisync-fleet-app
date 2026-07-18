@@ -1,5 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Database, Device, LogRow, ProfileConfig, TelemetryRow } from '@/lib/types';
+import { evaluateClimateStep, INITIAL_CLIMATE_STATE, type ClimateProfile, type ClimateState } from '@/lib/automation';
+import { tempRangeC } from '@/lib/units';
 
 export type TimeRange = { from: string; to: string }; // ISO timestamps
 
@@ -137,6 +139,13 @@ export type ReconstructedState = {
   automationEnabled: boolean | null;
   config: ResolvedConfig;
   lastEvent: LogRow | null; // most recent log row (any tag) at/before this instant
+  // Fan is a single outlet driven by an OR of two independent triggers
+  // (docs/automation-rules.md §5) — "fan is on" alone can't tell you which
+  // one is actually active. These are the real recomputed triggers from
+  // replaying automation.ts's evaluateClimateStep over telemetry, not a
+  // guess from the shared outlet state.
+  tooHot: boolean | null;
+  tooHumid: boolean | null;
 };
 
 // Implements docs/monitoring-webapp-plan.md §5: take the most recent
@@ -146,9 +155,31 @@ export function reconstructStateAt(data: DeviceTimelineData, t: string): Reconst
   const { device, telemetry, events, allLogs, configLogs } = data;
 
   let baseTelemetry: TelemetryRow | null = null;
+  // Replayed alongside baseTelemetry, in the same pass, so the trigger
+  // state always corresponds to exactly the same samples used for
+  // everything else here — see automation-rules.md §3-5 for the formulas
+  // and the ReconstructedState.tooHot/tooHumid doc comment for why this
+  // exists instead of reading it off the Fan's reported on/off state.
+  let climateState: ClimateState = INITIAL_CLIMATE_STATE;
+  let tooHot: boolean | null = null;
+  let tooHumid: boolean | null = null;
   for (const row of telemetry) {
     if (row.created_at > t) break;
     baseTelemetry = row;
+
+    const rowConfig = resolveConfigAt(configLogs, device, row.created_at);
+    const range = tempRangeC(rowConfig.profileConfig);
+    const profile: ClimateProfile = {
+      tempLow: range?.low ?? 0,
+      tempHigh: range?.high ?? 100,
+      humidityLow: rowConfig.profileConfig?.hum_low ?? 0,
+      humidityHigh: rowConfig.profileConfig?.hum_high ?? 100,
+    };
+    const enabled = rowConfig.profileConfig?.enabled ?? false;
+    const result = evaluateClimateStep(climateState, profile, enabled, row.temp_c, row.hum);
+    climateState = result.state;
+    tooHot = result.decision.tooHot;
+    tooHumid = result.decision.tooHumid;
   }
 
   let mask = baseTelemetry?.outlet_mask ?? null;
@@ -196,5 +227,7 @@ export function reconstructStateAt(data: DeviceTimelineData, t: string): Reconst
     automationEnabled: config.profileConfig?.enabled ?? null,
     config,
     lastEvent,
+    tooHot,
+    tooHumid,
   };
 }
