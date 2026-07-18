@@ -25,6 +25,12 @@ export async function updateSession(request: NextRequest) {
         cookiesToSet.forEach(({ name, value, options }) => response.cookies.set(name, value, options));
       },
     },
+    global: {
+      // See the matching comment in src/lib/supabase/server.ts — Next's
+      // patched fetch caches GET requests by default even here, and a
+      // stale auth decision is worse than a slightly slower one.
+      fetch: (input, init) => fetch(input, { ...init, cache: 'no-store' }),
+    },
   });
 
   // Do not run any code between createServerClient and getUser — it

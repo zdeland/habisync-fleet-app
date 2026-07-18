@@ -34,5 +34,14 @@ export function createClient() {
         }
       },
     },
+    global: {
+      // supabase-js calls the runtime's global fetch, which in a Next.js
+      // Server Component is Next's own patched fetch — it caches GET
+      // requests by default regardless of whether the page itself is
+      // dynamic. This is a live monitoring tool; a cached devices/logs/
+      // telemetry read is a bug (stale last_seen, stale readings), never
+      // a feature, so opt every request out explicitly.
+      fetch: (input, init) => fetch(input, { ...init, cache: 'no-store' }),
+    },
   });
 }
