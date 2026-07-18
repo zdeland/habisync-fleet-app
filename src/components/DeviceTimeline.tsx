@@ -46,6 +46,61 @@ function displayTime(iso: string, deviceTime: string | null) {
   return formatTime(new Date(deviceTime ?? iso).getTime());
 }
 
+// Palette + component shapes lifted verbatim from the on-device dashboard
+// (src/main.cpp's handleDashboard(), per the HabiSync UI style guide) so the
+// reconstructed state reads as the device's own screen, not an approximation.
+// Fixed, not theme-reactive — matches the guide's ".device" treatment.
+const DEVICE = {
+  screen: '#122333',
+  text: '#eee',
+  textSecondary: '#B8C4D0',
+  textTertiary: '#93A8BD',
+  surface: '#141414',
+  good: '#48BB78',
+  alert: '#F56565',
+  heating: '#F6AD55',
+  disabledDot: '#888',
+  activeBorder: '#6EC9E6',
+};
+
+const ROLE_ICONS: Record<string, string> = {
+  'Day Light': '☀️',
+  Heater: '🔥',
+  Mister: '💧',
+  Fan: '🌀',
+  'UVB Light': '🔆',
+};
+
+// Unassigned/custom outlet roles (a raw Kasa alias) fall back to a plug icon.
+function iconForRole(role: string) {
+  return ROLE_ICONS[role] ?? '🔌';
+}
+
+// Mirrors the on-device status-box's four states (disabled/heating/too hot/
+// normal), derived from the same reconstructed outlet + climate-target data
+// rather than re-implementing the firmware's control logic from scratch.
+function deriveClimateStatus(state: ReconstructedState): { dot: string; label: string } {
+  if (state.automationEnabled === false) {
+    return { dot: DEVICE.disabledDot, label: 'AUTOMATION DISABLED' };
+  }
+  if (state.automationEnabled == null) {
+    return { dot: DEVICE.disabledDot, label: 'AUTOMATION STATUS UNKNOWN' };
+  }
+
+  const heater = state.outlets.find((outlet) => outlet.role === 'Heater');
+  if (heater?.on) {
+    return { dot: DEVICE.heating, label: 'HEATING — heat outlet ON' };
+  }
+
+  const fan = state.outlets.find((outlet) => outlet.role === 'Fan');
+  const tempHigh = state.config.profileConfig?.temp_high_f;
+  if (fan?.on && tempHigh != null && state.tempF != null && state.tempF > tempHigh) {
+    return { dot: DEVICE.alert, label: 'TOO HOT — fan ON' };
+  }
+
+  return { dot: DEVICE.good, label: 'TEMP NORMAL — no action needed' };
+}
+
 export default function DeviceTimeline({
   data,
   range,
@@ -208,19 +263,20 @@ export default function DeviceTimeline({
 }
 
 function ContextPanel({ state }: { state: ReconstructedState }) {
+  const status = deriveClimateStatus(state);
+
   return (
-    <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-black/20">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold">State at {formatTime(new Date(state.timestamp).getTime())}</h2>
-        <div
-          className={`rounded-full border px-3 py-1 text-xs font-medium ${
-            state.automationEnabled
-              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-              : 'border-slate-700 bg-slate-800 text-slate-400'
-          }`}
-        >
-          Automation: {state.automationEnabled == null ? 'unknown' : state.automationEnabled ? 'enabled' : 'disabled'}
-        </div>
+    <section className="rounded-2xl p-6 shadow-xl shadow-black/40" style={{ background: DEVICE.screen }}>
+      <h2 className="mb-4 text-[1.1em]" style={{ color: DEVICE.text }}>
+        State at {formatTime(new Date(state.timestamp).getTime())}
+      </h2>
+
+      <div
+        className="mb-4 flex items-center gap-2.5 rounded-lg px-3 py-3 font-mono text-[0.85em]"
+        style={{ background: DEVICE.surface, color: DEVICE.text }}
+      >
+        <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ background: status.dot }} />
+        <span>{status.label}</span>
       </div>
 
       {state.config.isFallback && (
@@ -230,36 +286,64 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
         </p>
       )}
 
-      <div className="mb-4 flex flex-wrap gap-6 text-sm">
+      <div className="mb-5 flex flex-wrap gap-8">
         <div>
-          <p className="text-slate-500">Temperature</p>
-          <p className="text-2xl font-semibold text-sky-300">{state.tempF != null ? `${state.tempF.toFixed(1)}°F` : '—'}</p>
+          <p className="text-[0.9em]" style={{ color: DEVICE.textSecondary }}>
+            Current Temperature
+          </p>
+          <p className="text-[1.6em] font-bold" style={{ color: DEVICE.text }}>
+            {state.tempF != null ? `${state.tempF.toFixed(1)} °F` : '—'}
+          </p>
         </div>
         <div>
-          <p className="text-slate-500">Humidity</p>
-          <p className="text-2xl font-semibold text-violet-300">{state.hum != null ? `${state.hum}%` : '—'}</p>
+          <p className="text-[0.9em]" style={{ color: DEVICE.textSecondary }}>
+            Current Humidity
+          </p>
+          <p className="text-[1.6em] font-bold" style={{ color: DEVICE.text }}>
+            {state.hum != null ? `${state.hum.toFixed(1)} %` : '—'}
+          </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+      <div className="flex flex-wrap justify-center gap-5">
         {state.outlets.map((outlet) => (
-          <div key={outlet.index} className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-            <p className="text-sm font-medium text-slate-200">{outlet.role}</p>
+          <div key={outlet.index} className="flex w-[84px] flex-col items-center gap-2">
+            <div
+              className="rounded-[10px] border-2 p-2"
+              style={{ borderColor: outlet.on ? DEVICE.activeBorder : 'transparent' }}
+            >
+              <div className="text-center text-[2em]" style={{ opacity: outlet.on ? 1 : 0.35 }}>
+                {iconForRole(outlet.role)}
+              </div>
+            </div>
+            <p className="text-center text-[0.8em]" style={{ color: DEVICE.textSecondary }}>
+              {outlet.role}
+            </p>
             <p
-              className={`mt-1 text-xs font-medium ${
-                outlet.on == null ? 'text-slate-500' : outlet.on ? 'text-emerald-300' : 'text-slate-500'
-              }`}
+              className="text-center text-[0.75em] font-medium"
+              style={{ color: outlet.on ? DEVICE.good : DEVICE.textTertiary }}
             >
               {outlet.on == null ? 'unknown' : outlet.on ? 'ON' : 'OFF'}
-              {outlet.since && ` since ${displayTime(outlet.since, outlet.sinceDeviceTime)}`}
             </p>
-            {outlet.reason && <p className="mt-1 text-xs text-slate-500">{outlet.reason}</p>}
+            {outlet.since && (
+              <p className="text-center text-[0.7em]" style={{ color: DEVICE.textTertiary }}>
+                since {displayTime(outlet.since, outlet.sinceDeviceTime)}
+              </p>
+            )}
+            {outlet.reason && (
+              <p className="text-center text-[0.7em]" style={{ color: DEVICE.textTertiary }}>
+                {outlet.reason}
+              </p>
+            )}
           </div>
         ))}
       </div>
 
       {state.lastEvent && (
-        <p className="mt-4 border-t border-slate-800 pt-4 text-xs text-slate-400">
+        <p
+          className="mt-5 pt-4 text-xs"
+          style={{ borderTop: '1px solid rgba(255,255,255,0.1)', color: DEVICE.textTertiary }}
+        >
           Last event ({displayTime(state.lastEvent.created_at, state.lastEvent.device_time)}):{' '}
           {state.lastEvent.message}
         </p>

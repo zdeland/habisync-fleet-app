@@ -19,6 +19,7 @@
 .DS_Store
 *.pem
 npm-debug.log*
+*:Zone.Identifier
 
 # typescript
 *.tsbuildinfo
