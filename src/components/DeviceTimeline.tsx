@@ -61,6 +61,27 @@ function displayTime(iso: string, deviceTime: string | null) {
   return formatTime(new Date(deviceTime ?? iso).getTime());
 }
 
+// Outlet transition messages read "Heater [1] turned ON — temperature below
+// target range" — keep only the reason after the dash for the compact
+// per-outlet display, drop the "what turned on/off" part (already shown by
+// the icon + ON/OFF label right above it).
+function reasonOnly(message: string) {
+  const match = message.match(/[-—]\s*(.*)$/);
+  return match ? match[1] : message;
+}
+
+// Colors the reason badge by what triggered the transition — reuses the
+// same cool/alert/good palette as the gauges so "temperature below target
+// range" reads as the same blue as a TOO COLD badge, not an unrelated hue.
+function reasonBadgeColor(reason: string): typeof GAUGE_COLORS.good {
+  const text = reason.toLowerCase();
+  if (text.includes('below') || text.includes('low') || text.includes('under')) return GAUGE_COLORS.cool;
+  if (text.includes('above') || text.includes('high') || text.includes('ceiling') || text.includes('over')) {
+    return GAUGE_COLORS.alert;
+  }
+  return GAUGE_COLORS.good;
+}
+
 const ROLE_ICONS: Record<string, string> = {
   'Day Light': '☀️',
   Heater: '🔥',
@@ -179,6 +200,7 @@ function GaugeColumn({
   highLabel,
   lowColor,
   automationEnabled,
+  controlStatus,
 }: {
   label: string;
   value: number | null;
@@ -189,6 +211,7 @@ function GaugeColumn({
   highLabel: string;
   lowColor: typeof GAUGE_COLORS.cool;
   automationEnabled: boolean | null;
+  controlStatus: { dotClassName: string; label: string };
 }) {
   const hasTarget = automationEnabled === true && low != null && high != null;
 
@@ -231,6 +254,10 @@ function GaugeColumn({
           {unit}
         </p>
       )}
+      <div className="mt-3 flex w-full items-center gap-2.5 rounded-lg bg-device-surface px-3 py-2.5 font-mono text-[0.8em] text-device-text">
+        <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${controlStatus.dotClassName}`} />
+        <span>{controlStatus.label}</span>
+      </div>
     </div>
   );
 }
@@ -273,11 +300,13 @@ function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null
   );
 }
 
-// Mirrors the on-device status-box's four states (disabled/heating/too hot/
-// normal, per docs/style-guide.md §8), derived from the same reconstructed
-// outlet + climate-target data rather than re-implementing the firmware's
-// control logic from scratch.
-function deriveClimateStatus(state: ReconstructedState): { dotClassName: string; label: string } {
+// Mirrors the on-device dashboard's two separate "Temperature Control
+// Check" / "Humidity Control Check" status-boxes (docs/style-guide.md §8:
+// "temperature side shown; humidity side mirrors it with misting/
+// too-humid wording") — derived from the same reconstructed outlet +
+// climate-target data rather than re-implementing the firmware's control
+// logic from scratch.
+function deriveTempStatus(state: ReconstructedState): { dotClassName: string; label: string } {
   if (state.automationEnabled === false) {
     return { dotClassName: 'bg-device-disabled', label: 'AUTOMATION DISABLED' };
   }
@@ -299,6 +328,28 @@ function deriveClimateStatus(state: ReconstructedState): { dotClassName: string;
   return { dotClassName: 'bg-device-good', label: 'TEMP NORMAL — no action needed' };
 }
 
+function deriveHumidityStatus(state: ReconstructedState): { dotClassName: string; label: string } {
+  if (state.automationEnabled === false) {
+    return { dotClassName: 'bg-device-disabled', label: 'AUTOMATION DISABLED' };
+  }
+  if (state.automationEnabled == null) {
+    return { dotClassName: 'bg-device-disabled', label: 'AUTOMATION STATUS UNKNOWN' };
+  }
+
+  const mister = state.outlets.find((outlet) => outlet.role === 'Mister');
+  if (mister?.on) {
+    return { dotClassName: 'bg-device-heating', label: 'MISTING — mister ON' };
+  }
+
+  const fan = state.outlets.find((outlet) => outlet.role === 'Fan');
+  const humHigh = state.config.profileConfig?.hum_high;
+  if (fan?.on && humHigh != null && state.hum != null && state.hum > humHigh) {
+    return { dotClassName: 'bg-device-alert', label: 'TOO HUMID — fan ON' };
+  }
+
+  return { dotClassName: 'bg-device-good', label: 'HUMIDITY NORMAL — no action needed' };
+}
+
 export default function DeviceTimeline({
   data,
   range,
@@ -313,6 +364,44 @@ export default function DeviceTimeline({
   const fromMs = new Date(range.from).getTime();
   const toMs = new Date(range.to).getTime();
   const [scrubMs, setScrubMs] = useState(toMs);
+
+  // Same rows as the marker strip below (data.allLogs, any tag) so the
+  // prev/next buttons step between exactly what's plotted there.
+  const eventTimestamps = useMemo(
+    () => data.allLogs.map((row) => new Date(row.created_at).getTime()),
+    [data.allLogs],
+  );
+
+  // Last marker at/before the scrub position, for the "x/total" readout —
+  // uses <=, unlike prev/next below, so it counts a marker the scrubber is
+  // sitting exactly on as "reached."
+  const eventsReached = useMemo(() => {
+    let count = 0;
+    for (const t of eventTimestamps) {
+      if (t <= scrubMs) count++;
+      else break;
+    }
+    return count;
+  }, [eventTimestamps, scrubMs]);
+
+  // Strictly-before/strictly-after so stepping from a position between two
+  // markers always lands on the nearest one in that direction, and
+  // stepping from a position exactly on a marker moves to its neighbor.
+  const prevEventIndex = useMemo(() => {
+    let idx = -1;
+    for (let i = 0; i < eventTimestamps.length; i++) {
+      if (eventTimestamps[i] < scrubMs) idx = i;
+      else break;
+    }
+    return idx;
+  }, [eventTimestamps, scrubMs]);
+
+  const nextEventIndex = useMemo(() => {
+    for (let i = 0; i < eventTimestamps.length; i++) {
+      if (eventTimestamps[i] > scrubMs) return i;
+    }
+    return -1;
+  }, [eventTimestamps, scrubMs]);
 
   const chartData = useMemo(
     () => data.telemetry.map((row) => ({ t: new Date(row.created_at).getTime(), tempF: row.temp_f, hum: row.hum })),
@@ -451,6 +540,28 @@ export default function DeviceTimeline({
           onChange={(event) => setScrubMs(Number(event.target.value))}
           className="mt-2 w-full accent-device-accent"
         />
+
+        <div className="mt-3 flex items-center justify-center gap-4">
+          <button
+            type="button"
+            onClick={() => prevEventIndex !== -1 && setScrubMs(eventTimestamps[prevEventIndex])}
+            disabled={prevEventIndex === -1}
+            className="rounded bg-device-surface px-3 py-1 text-sm text-device-text-secondary transition hover:bg-device-surface-hover disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            ◀ Prev
+          </button>
+          <p className="text-xs text-device-text-tertiary">
+            {eventsReached}/{eventTimestamps.length} events
+          </p>
+          <button
+            type="button"
+            onClick={() => nextEventIndex !== -1 && setScrubMs(eventTimestamps[nextEventIndex])}
+            disabled={nextEventIndex === -1}
+            className="rounded bg-device-surface px-3 py-1 text-sm text-device-text-secondary transition hover:bg-device-surface-hover disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            Next ▶
+          </button>
+        </div>
       </section>
 
       <ContextPanel state={state} />
@@ -460,16 +571,9 @@ export default function DeviceTimeline({
 }
 
 function ContextPanel({ state }: { state: ReconstructedState }) {
-  const status = deriveClimateStatus(state);
-
   return (
     <section className="rounded-2xl bg-device-screen p-6 shadow-device">
       <h2 className="mb-4 text-[1.1em] text-device-text">State at {formatTime(new Date(state.timestamp).getTime())}</h2>
-
-      <div className="mb-4 flex items-center gap-2.5 rounded-lg bg-device-surface px-3 py-3 font-mono text-[0.85em] text-device-text">
-        <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${status.dotClassName}`} />
-        <span>{status.label}</span>
-      </div>
 
       {state.config.isFallback && (
         <p className="mb-4 rounded-lg border border-device-heating/30 bg-device-heating/10 px-3 py-2 text-xs text-device-heating">
@@ -490,6 +594,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
           highLabel="TOO HOT"
           lowColor={GAUGE_COLORS.cool}
           automationEnabled={state.automationEnabled}
+          controlStatus={deriveTempStatus(state)}
         />
         <GaugeColumn
           label="Current Humidity"
@@ -501,6 +606,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
           highLabel="TOO HUMID"
           lowColor={GAUGE_COLORS.dry}
           automationEnabled={state.automationEnabled}
+          controlStatus={deriveHumidityStatus(state)}
         />
       </div>
 
@@ -524,22 +630,23 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
             >
               {outlet.on == null ? 'unknown' : outlet.on ? 'ON' : 'OFF'}
             </p>
+            {outlet.reason && (
+              <div
+                className={`rounded px-2 py-0.5 text-center text-[0.65em] font-mono text-device-screen ${
+                  reasonBadgeColor(outlet.reason).className
+                }`}
+              >
+                {reasonOnly(outlet.reason)}
+              </div>
+            )}
             {outlet.since && (
               <p className="text-center text-[0.7em] text-device-text-tertiary">
                 since {displayTime(outlet.since, outlet.sinceDeviceTime)}
               </p>
             )}
-            {outlet.reason && <p className="text-center text-[0.7em] text-device-text-tertiary">{outlet.reason}</p>}
           </div>
         ))}
       </div>
-
-      {state.lastEvent && (
-        <p className="mt-5 border-t border-white/10 pt-4 text-xs text-device-text-tertiary">
-          Last event ({displayTime(state.lastEvent.created_at, state.lastEvent.device_time)}):{' '}
-          {state.lastEvent.message}
-        </p>
-      )}
     </section>
   );
 }
