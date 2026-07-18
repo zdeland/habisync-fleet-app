@@ -106,6 +106,135 @@ function iconForLog(row: LogRow, device: Device, configLogs: LogRow[]) {
   return TAG_ICONS[row.tag] ?? '🔔';
 }
 
+// Zone/badge colors as both a literal hex (for the gauge's SVG arcs, which
+// can't take Tailwind classes) and the matching Tailwind class (for the
+// badge below it) — kept as one pair per role so the two never drift apart.
+const GAUGE_COLORS = {
+  cool: { hex: '#4299E1', className: 'bg-device-cool' }, // temp below target
+  dry: { hex: '#C05621', className: 'bg-device-dry' }, // humidity below target
+  good: { hex: '#48BB78', className: 'bg-device-good' },
+  alert: { hex: '#F56565', className: 'bg-device-alert' },
+  neutral: { hex: '#333', className: 'bg-device-disabled' },
+};
+
+// docs/style-guide.md §6 — hand-drawn semicircle gauge, viewBox 0 0 200 120,
+// center (100,100), radius 80, 16px zone arcs, needle + center dot. Domain
+// is always 0-100 (matches the on-device gauge exactly, including for
+// temperature — zone breakpoints come from the live climate targets).
+function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number) {
+  const a = ((angleDeg - 180) * Math.PI) / 180;
+  return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
+}
+
+function arcPath(cx: number, cy: number, r: number, a0: number, a1: number) {
+  const p0 = polarToCartesian(cx, cy, r, a0);
+  const p1 = polarToCartesian(cx, cy, r, a1);
+  const largeArc = a1 - a0 > 180 ? 1 : 0;
+  return `M ${p0.x} ${p0.y} A ${r} ${r} 0 ${largeArc} 1 ${p1.x} ${p1.y}`;
+}
+
+type GaugeZone = { from: number; to: number; color: string };
+
+function Gauge({ value, min, max, zones }: { value: number | null; min: number; max: number; zones: GaugeZone[] }) {
+  const cx = 100;
+  const cy = 100;
+  const r = 80;
+  const clamped = value == null ? null : Math.max(min, Math.min(max, value));
+  const needle = clamped == null ? null : polarToCartesian(cx, cy, r - 14, ((clamped - min) / (max - min)) * 180);
+
+  return (
+    <svg viewBox="0 0 200 120" className="block w-full">
+      {zones.map((zone, i) => {
+        const from = Math.max(min, Math.min(max, zone.from));
+        const to = Math.max(min, Math.min(max, zone.to));
+        if (to <= from) return null;
+        const a0 = ((from - min) / (max - min)) * 180;
+        const a1 = ((to - min) / (max - min)) * 180;
+        return <path key={i} d={arcPath(cx, cy, r, a0, a1)} stroke={zone.color} strokeWidth={16} fill="none" />;
+      })}
+      {needle && (
+        <>
+          <line x1={cx} y1={cy} x2={needle.x} y2={needle.y} stroke="#eee" strokeWidth={4} strokeLinecap="round" />
+          <circle cx={cx} cy={cy} r={6} fill="#eee" />
+        </>
+      )}
+      <text x={16} y={114} fill="#93A8BD" fontSize={12}>
+        {min}
+      </text>
+      <text x={184} y={114} fill="#93A8BD" fontSize={12} textAnchor="end">
+        {max}
+      </text>
+    </svg>
+  );
+}
+
+// One gauge + value readout + in-range badge, for either temp or humidity.
+function GaugeColumn({
+  label,
+  value,
+  unit,
+  low,
+  high,
+  lowLabel,
+  highLabel,
+  lowColor,
+  automationEnabled,
+}: {
+  label: string;
+  value: number | null;
+  unit: string;
+  low: number | undefined;
+  high: number | undefined;
+  lowLabel: string;
+  highLabel: string;
+  lowColor: typeof GAUGE_COLORS.cool;
+  automationEnabled: boolean | null;
+}) {
+  const hasTarget = automationEnabled === true && low != null && high != null;
+
+  const zones: GaugeZone[] = hasTarget
+    ? [
+        { from: 0, to: low, color: lowColor.hex },
+        { from: low, to: high, color: GAUGE_COLORS.good.hex },
+        { from: high, to: 100, color: GAUGE_COLORS.alert.hex },
+      ]
+    : [{ from: 0, to: 100, color: GAUGE_COLORS.neutral.hex }];
+
+  let badge: { className: string; label: string };
+  if (!hasTarget) {
+    badge = { className: GAUGE_COLORS.neutral.className, label: automationEnabled === false ? 'AUTOMATION DISABLED' : 'NO TARGET' };
+  } else if (value == null) {
+    badge = { className: GAUGE_COLORS.neutral.className, label: 'NO DATA' };
+  } else if (value < low) {
+    badge = { className: lowColor.className, label: lowLabel };
+  } else if (value > high) {
+    badge = { className: GAUGE_COLORS.alert.className, label: highLabel };
+  } else {
+    badge = { className: GAUGE_COLORS.good.className, label: 'IN RANGE' };
+  }
+
+  return (
+    <div className="flex flex-1 flex-col items-center">
+      <div className="relative w-full max-w-[220px]">
+        <Gauge value={value} min={0} max={100} zones={zones} />
+        <div className="absolute inset-x-0 top-[58%] -translate-y-1/2 text-center text-[1.6em] font-bold text-device-text">
+          {value != null ? `${value.toFixed(1)}${unit}` : '—'}
+        </div>
+      </div>
+      <p className="mt-1 text-[0.9em] text-device-text-secondary">{label}</p>
+      <div className={`mt-2 rounded-full px-3 py-1 font-mono text-[0.7em] text-device-screen ${badge.className}`}>
+        {badge.label}
+      </div>
+      {hasTarget && (
+        <p className="mt-1.5 text-[0.8em] text-device-text-tertiary">
+          Optimal range: {low.toFixed(1)} – {high.toFixed(1)}
+          {unit}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // Mirrors the on-device status-box's four states (disabled/heating/too hot/
 // normal, per docs/style-guide.md §8), derived from the same reconstructed
 // outlet + climate-target data rather than re-implementing the firmware's
@@ -311,19 +440,29 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
         </p>
       )}
 
-      <div className="mb-5 flex flex-wrap gap-8">
-        <div>
-          <p className="text-[0.9em] text-device-text-secondary">Current Temperature</p>
-          <p className="text-[1.6em] font-bold text-device-text">
-            {state.tempF != null ? `${state.tempF.toFixed(1)} °F` : '—'}
-          </p>
-        </div>
-        <div>
-          <p className="text-[0.9em] text-device-text-secondary">Current Humidity</p>
-          <p className="text-[1.6em] font-bold text-device-text">
-            {state.hum != null ? `${state.hum.toFixed(1)} %` : '—'}
-          </p>
-        </div>
+      <div className="mb-6 flex flex-wrap gap-8">
+        <GaugeColumn
+          label="Current Temperature"
+          value={state.tempF}
+          unit="°F"
+          low={state.config.profileConfig?.temp_low_f}
+          high={state.config.profileConfig?.temp_high_f}
+          lowLabel="TOO COLD"
+          highLabel="TOO HOT"
+          lowColor={GAUGE_COLORS.cool}
+          automationEnabled={state.automationEnabled}
+        />
+        <GaugeColumn
+          label="Current Humidity"
+          value={state.hum}
+          unit="%"
+          low={state.config.profileConfig?.hum_low}
+          high={state.config.profileConfig?.hum_high}
+          lowLabel="TOO DRY"
+          highLabel="TOO HUMID"
+          lowColor={GAUGE_COLORS.dry}
+          automationEnabled={state.automationEnabled}
+        />
       </div>
 
       <div className="flex flex-wrap justify-center gap-5">
