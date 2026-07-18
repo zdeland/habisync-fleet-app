@@ -14,6 +14,7 @@ import {
   YAxis,
 } from 'recharts';
 import { reconstructStateAt, resolveConfigAt, type DeviceTimelineData, type ReconstructedState } from '@/lib/timeline';
+import { deriveHealthEvents, findTelemetryGaps, mergeTimelineEntries, type TimelineEntry } from '@/lib/health';
 import type { Device, LogLevel, LogRow, LogTag, ProfileConfig } from '@/lib/types';
 import { celsiusDeltaToFahrenheit, celsiusToFahrenheit, tempRangeC } from '@/lib/units';
 import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
@@ -30,8 +31,10 @@ const CHART_COLORS = {
   temp: '#4FD1C5',
   hum: '#4299E1',
   tempBand: '#4FD1C5',
+  humBand: '#4299E1',
   tooltipBg: '#1D3A57',
   scrubLine: '#eee',
+  offlineGap: '#F56565', // matches device-alert — a gap in reporting, not real continuous data
 };
 
 const LEVEL_DOT_CLASSNAMES: Record<LogLevel, string> = {
@@ -46,6 +49,34 @@ const PRESET_LABELS: Record<Preset, string> = {
   '24h': 'Last day',
   '7d': 'Last week',
 };
+
+// A fixed 0-100 (or Recharts' own auto-scaled) domain wastes most of the
+// chart's height when real readings only ever move within a narrow band —
+// a temp that hovers at 75-90°F barely moves on a 0-100 axis. Size the axis
+// so the target range itself fills TARGET_RANGE_FRACTION of the visible
+// height instead, expanding further (asymmetrically if needed) only when
+// real data actually falls outside that — never clip real readings just to
+// hit the fraction exactly.
+const TARGET_RANGE_FRACTION = 0.75;
+
+function computeChartDomain(
+  targetLow: number,
+  targetHigh: number,
+  dataMin: number,
+  dataMax: number,
+): [number, number] {
+  const targetSpan = targetHigh - targetLow;
+  const totalSpan = targetSpan / TARGET_RANGE_FRACTION;
+  const pad = (totalSpan - targetSpan) / 2;
+
+  let domainMin = targetLow - pad;
+  let domainMax = targetHigh + pad;
+
+  if (dataMin < domainMin) domainMin = dataMin - pad * 0.1;
+  if (dataMax > domainMax) domainMax = dataMax + pad * 0.1;
+
+  return [domainMin, domainMax];
+}
 
 function formatTime(ms: number) {
   return new Date(ms).toLocaleString(undefined, {
@@ -445,11 +476,23 @@ export default function DeviceTimeline({
     }
   }, [toMs]);
 
-  // Same rows as the marker strip below (data.allLogs, any tag) so the
-  // prev/next buttons step between exactly what's plotted there.
+  // Offline/reconnect + health-severity-change markers, computed purely
+  // from data already fetched for this range — nothing persisted, nothing
+  // written back to the device's own logs table (see src/lib/health.ts).
+  const healthEvents = useMemo(
+    () => deriveHealthEvents(data, { from: range.from, to: range.to }),
+    [data, range.from, range.to],
+  );
+  const timelineEntries = useMemo(
+    () => mergeTimelineEntries(data.allLogs, healthEvents),
+    [data.allLogs, healthEvents],
+  );
+
+  // Same entries as the marker strip below (real logs + synthetic health
+  // events) so the prev/next buttons step between exactly what's plotted.
   const eventTimestamps = useMemo(
-    () => data.allLogs.map((row) => new Date(row.created_at).getTime()),
-    [data.allLogs],
+    () => timelineEntries.map((entry) => new Date(entry.createdAt).getTime()),
+    [timelineEntries],
   );
 
   // Last marker at/before the scrub position, for the "x/total" readout —
@@ -483,14 +526,46 @@ export default function DeviceTimeline({
     return -1;
   }, [eventTimestamps, scrubMs]);
 
-  const chartData = useMemo(
+  // A red dashed line across each detected offline gap — otherwise Recharts
+  // just draws a straight line through it in the normal data color, making
+  // an hours-long outage look like continuous readings. Rendered as
+  // separate two-point Line overlays (own `data`/dataKey, not the main
+  // series) so only the gap itself is red, not the real data either side.
+  const offlineGaps = useMemo(() => findTelemetryGaps(data.telemetry), [data.telemetry]);
+
+  const chartData = useMemo(() => {
+    const points = data.telemetry.map((row) => ({
+      t: new Date(row.created_at).getTime(),
+      tempF: celsiusToFahrenheit(row.temp_c) as number | null,
+      hum: row.hum as number | null,
+    }));
+    // Real data has no marker for "nothing was reported here" — a null
+    // point at the midpoint of each gap makes Recharts actually break the
+    // main line there (connectNulls={false} below) instead of silently
+    // connecting straight across it in the normal color, which would
+    // otherwise render on top of / indistinguishable from the red overlay.
+    const gapBreaks = offlineGaps.map((gap) => ({
+      t: (new Date(gap.prev.created_at).getTime() + new Date(gap.curr.created_at).getTime()) / 2,
+      tempF: null,
+      hum: null,
+    }));
+    return [...points, ...gapBreaks].sort((a, b) => a.t - b.t);
+  }, [data.telemetry, offlineGaps]);
+  const tempGapSegments = useMemo(
     () =>
-      data.telemetry.map((row) => ({
-        t: new Date(row.created_at).getTime(),
-        tempF: celsiusToFahrenheit(row.temp_c),
-        hum: row.hum,
-      })),
-    [data.telemetry],
+      offlineGaps.map((gap) => [
+        { t: new Date(gap.prev.created_at).getTime(), gapTempF: celsiusToFahrenheit(gap.prev.temp_c) },
+        { t: new Date(gap.curr.created_at).getTime(), gapTempF: celsiusToFahrenheit(gap.curr.temp_c) },
+      ]),
+    [offlineGaps],
+  );
+  const humGapSegments = useMemo(
+    () =>
+      offlineGaps.map((gap) => [
+        { t: new Date(gap.prev.created_at).getTime(), gapHum: gap.prev.hum },
+        { t: new Date(gap.curr.created_at).getTime(), gapHum: gap.curr.hum },
+      ]),
+    [offlineGaps],
   );
 
   // Config rarely changes mid-window, but when it does the target band
@@ -508,6 +583,44 @@ export default function DeviceTimeline({
       return { start: new Date(start).getTime(), end: new Date(end).getTime(), config };
     });
   }, [data.configLogs, data.device, range.from, range.to]);
+
+  // Union across every segment's target range (not just the latest one),
+  // so an older, wider band earlier in the window never gets clipped by a
+  // domain sized only for the current config.
+  const tempDomain = useMemo((): [number, number] | undefined => {
+    const ranges = segments
+      .map((s) => tempRangeC(s.config.profileConfig))
+      .filter((r): r is { low: number; high: number } => r != null)
+      .map((r) => ({ low: celsiusToFahrenheit(r.low), high: celsiusToFahrenheit(r.high) }));
+    if (ranges.length === 0) return undefined;
+
+    const values = chartData.map((d) => d.tempF).filter((v): v is number => v != null);
+    if (values.length === 0) return undefined;
+
+    return computeChartDomain(
+      Math.min(...ranges.map((r) => r.low)),
+      Math.max(...ranges.map((r) => r.high)),
+      Math.min(...values),
+      Math.max(...values),
+    );
+  }, [segments, chartData]);
+
+  const humDomain = useMemo((): [number, number] | undefined => {
+    const ranges = segments
+      .map((s) => s.config.profileConfig)
+      .filter((c): c is NonNullable<typeof c> => c?.hum_low != null && c?.hum_high != null);
+    if (ranges.length === 0) return undefined;
+
+    const values = chartData.map((d) => d.hum).filter((v): v is number => v != null);
+    if (values.length === 0) return undefined;
+
+    return computeChartDomain(
+      Math.min(...ranges.map((c) => c.hum_low)),
+      Math.max(...ranges.map((c) => c.hum_high)),
+      Math.min(...values),
+      Math.max(...values),
+    );
+  }, [segments, chartData]);
 
   const scrubTimestamp = new Date(scrubMs).toISOString();
   const state = useMemo(() => reconstructStateAt(data, scrubTimestamp), [data, scrubTimestamp]);
@@ -559,8 +672,21 @@ export default function DeviceTimeline({
                   stroke={CHART_COLORS.axis}
                   fontSize={12}
                 />
-                <YAxis yAxisId="temp" stroke={CHART_COLORS.temp} fontSize={12} width={40} />
-                <YAxis yAxisId="hum" orientation="right" stroke={CHART_COLORS.hum} fontSize={12} width={40} />
+                <YAxis
+                  yAxisId="temp"
+                  stroke={CHART_COLORS.temp}
+                  fontSize={12}
+                  width={40}
+                  domain={tempDomain ?? ['auto', 'auto']}
+                />
+                <YAxis
+                  yAxisId="hum"
+                  orientation="right"
+                  stroke={CHART_COLORS.hum}
+                  fontSize={12}
+                  width={40}
+                  domain={humDomain ?? ['auto', 'auto']}
+                />
                 <Tooltip
                   labelFormatter={(t) => formatTime(Number(t))}
                   contentStyle={{ background: CHART_COLORS.tooltipBg, border: 'none', fontSize: 12 }}
@@ -583,24 +709,73 @@ export default function DeviceTimeline({
                     />
                   );
                 })}
+                {segments.map((segment, i) => {
+                  const config = segment.config.profileConfig;
+                  if (config?.hum_low == null || config?.hum_high == null) return null;
+                  return (
+                    <ReferenceArea
+                      key={`hum-band-${i}`}
+                      yAxisId="hum"
+                      x1={segment.start}
+                      x2={segment.end}
+                      y1={config.hum_low}
+                      y2={config.hum_high}
+                      fill={CHART_COLORS.humBand}
+                      fillOpacity={0.1}
+                      stroke="none"
+                    />
+                  );
+                })}
                 <Line
                   yAxisId="temp"
                   type="stepAfter"
                   dataKey="tempF"
                   stroke={CHART_COLORS.temp}
+                  strokeWidth={2}
                   dot={false}
                   name="Temp °F"
                   isAnimationActive={false}
+                  connectNulls={false}
                 />
                 <Line
                   yAxisId="hum"
                   type="stepAfter"
                   dataKey="hum"
                   stroke={CHART_COLORS.hum}
+                  strokeWidth={2}
                   dot={false}
                   name="Humidity %"
                   isAnimationActive={false}
+                  connectNulls={false}
                 />
+                {tempGapSegments.map((segment, i) => (
+                  <Line
+                    key={`temp-gap-${i}`}
+                    yAxisId="temp"
+                    data={segment}
+                    dataKey="gapTempF"
+                    stroke={CHART_COLORS.offlineGap}
+                    strokeWidth={3}
+                    strokeDasharray="4 3"
+                    dot={false}
+                    legendType="none"
+                    isAnimationActive={false}
+                  />
+                ))}
+                {humGapSegments.map((segment, i) => (
+                  <Line
+                    key={`hum-gap-${i}`}
+                    yAxisId="hum"
+                    data={segment}
+                    dataKey="gapHum"
+                    stroke={CHART_COLORS.offlineGap}
+                    strokeWidth={3}
+                    strokeDasharray="4 3"
+                    dot={false}
+                    legendType="none"
+                    isAnimationActive={false}
+                  />
+                ))}
                 <ReferenceLine yAxisId="temp" x={scrubMs} stroke={CHART_COLORS.scrubLine} strokeDasharray="4 4" />
               </ComposedChart>
             </ResponsiveContainer>
@@ -608,12 +783,12 @@ export default function DeviceTimeline({
         )}
 
         <div className="relative mt-3 h-3 w-full">
-          {data.allLogs.map((row) => (
+          {timelineEntries.map((entry) => (
             <span
-              key={row.id}
-              title={`[${row.tag}] ${row.message}`}
-              className={`absolute top-0 h-3 w-1 -translate-x-1/2 rounded-full ${LEVEL_DOT_CLASSNAMES[row.level]}`}
-              style={{ left: `${((new Date(row.created_at).getTime() - fromMs) / (toMs - fromMs)) * 100}%` }}
+              key={entry.id}
+              title={entry.kind === 'log' ? `[${entry.row.tag}] ${entry.row.message}` : entry.message}
+              className={`absolute top-0 h-3 w-1 -translate-x-1/2 rounded-full ${LEVEL_DOT_CLASSNAMES[entry.level]}`}
+              style={{ left: `${((new Date(entry.createdAt).getTime() - fromMs) / (toMs - fromMs)) * 100}%` }}
             />
           ))}
         </div>
@@ -651,7 +826,7 @@ export default function DeviceTimeline({
       </section>
 
       <ContextPanel state={state} />
-      <EventLog data={data} />
+      <EventLog data={data} entries={timelineEntries} />
     </div>
   );
 }
@@ -750,8 +925,11 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
 
 // docs/style-guide.md §9 — event-row list, newest first for the whole
 // selected range (not just up to the scrub position, unlike ContextPanel).
-function EventLog({ data }: { data: DeviceTimelineData }) {
-  const newestFirst = useMemo(() => [...data.allLogs].reverse(), [data.allLogs]);
+// Merges real logs with the synthetic offline/health-change markers from
+// src/lib/health.ts — both render the same row shape, just with a
+// different icon/message source (see TimelineEntry's discriminated kind).
+function EventLog({ data, entries }: { data: DeviceTimelineData; entries: TimelineEntry[] }) {
+  const newestFirst = useMemo(() => [...entries].reverse(), [entries]);
 
   return (
     <section className="rounded-2xl bg-device-card p-6 shadow-device">
@@ -763,10 +941,23 @@ function EventLog({ data }: { data: DeviceTimelineData }) {
         </div>
       ) : (
         <div className="flex max-h-[420px] flex-col gap-2.5 overflow-y-auto">
-          {newestFirst.map((row) => {
+          {newestFirst.map((entry) => {
+            if (entry.kind === 'health') {
+              return (
+                <div key={entry.id} className="flex items-center gap-3 rounded-lg bg-device-surface px-3 py-2.5">
+                  <div className="w-[26px] flex-shrink-0 text-center text-[1.3em]">{entry.icon}</div>
+                  <div className="w-[130px] flex-shrink-0 text-[0.8em] text-device-text-tertiary">
+                    {formatTime(new Date(entry.createdAt).getTime())}
+                  </div>
+                  <div className="flex-1 text-[0.92em] text-device-text">{entry.message}</div>
+                </div>
+              );
+            }
+
+            const row = entry.row;
             const isTest = isTestReason(row.message);
             return (
-              <div key={row.id} className="flex items-center gap-3 rounded-lg bg-device-surface px-3 py-2.5">
+              <div key={entry.id} className="flex items-center gap-3 rounded-lg bg-device-surface px-3 py-2.5">
                 <div className="w-[26px] flex-shrink-0 text-center text-[1.3em]">
                   {iconForLog(row, data.device, data.configLogs)}
                 </div>

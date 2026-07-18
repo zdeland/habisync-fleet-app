@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import type { DeviceHealth } from '@/lib/queries';
+import { CRITICAL_ERROR_COUNT, WARNING_ERROR_COUNT, type DeviceHealth } from '@/lib/queries';
 import { celsiusToFahrenheit } from '@/lib/units';
 
 // Mirrors the on-device "status check" component (dot + mono one-liner),
@@ -14,8 +14,8 @@ const STATUS_META = {
 } as const;
 
 function deriveStatus({ isStale, recentErrorCount }: DeviceHealth): keyof typeof STATUS_META {
-  if (isStale || recentErrorCount >= 5) return 'critical';
-  if (recentErrorCount >= 1) return 'warning';
+  if (isStale || recentErrorCount >= CRITICAL_ERROR_COUNT) return 'critical';
+  if (recentErrorCount >= WARNING_ERROR_COUNT) return 'warning';
   return 'healthy';
 }
 

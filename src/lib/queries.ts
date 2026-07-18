@@ -2,9 +2,13 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Database, Device, TelemetryRow } from '@/lib/types';
 
 // devices.last_seen is upserted on a 5-min heartbeat (docs/monitoring-webapp-plan.md §4.1).
-const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
-const STALE_AFTER_MS = HEARTBEAT_INTERVAL_MS * 2;
-const ERROR_WINDOW_MS = 24 * 60 * 60 * 1000;
+// Exported so src/lib/health.ts's per-timeline offline/severity detection
+// can't drift from the fleet-wide definition of "stale"/"unhealthy" here.
+export const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+export const STALE_AFTER_MS = HEARTBEAT_INTERVAL_MS * 2;
+export const ERROR_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const WARNING_ERROR_COUNT = 1;
+export const CRITICAL_ERROR_COUNT = 5;
 
 export interface DeviceHealth {
   device: Device;
