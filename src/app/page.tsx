@@ -1,9 +1,9 @@
-import { Suspense } from 'react';
-import AutoRefresh from '@/components/AutoRefresh';
-import FleetOverview from '@/components/FleetOverview';
-import SignOutButton from '@/components/SignOutButton';
-import { requireUser } from '@/lib/supabase/auth';
-import { isSupabaseConfigured } from '@/lib/supabase/server';
+import { Suspense } from "react";
+import AutoRefresh from "@/components/AutoRefresh";
+import FleetOverview from "@/components/FleetOverview";
+import SignOutButton from "@/components/SignOutButton";
+import { requireUser } from "@/lib/supabase/auth";
+import { isSupabaseConfigured } from "@/lib/supabase/server";
 
 export default async function HomePage() {
   await requireUser();
@@ -14,10 +14,13 @@ export default async function HomePage() {
         <header className="rounded-2xl bg-device-card p-6 shadow-device">
           <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <div>
-              <p className="text-sm uppercase tracking-[0.3em] text-device-accent">HabiSync Fleet Monitor</p>
-              <h1 className="text-3xl font-semibold">Fleet overview</h1>
+              {/* <p className="text-sm uppercase tracking-[0.3em] text-device-accent">
+                HabiSync Fleet Monitor
+              </p> */}
+              <h1 className="text-3xl font-semibold">HabiSync Fleet Monitor</h1>
               <p className="mt-2 max-w-2xl text-sm text-device-text-secondary">
-                Review device health, recent activity, and early warning signals from the fleet.
+                Review device health, recent activity, and early warning signals
+                from the fleet.
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -32,7 +35,9 @@ export default async function HomePage() {
         <AutoRefresh intervalMs={20_000} />
         <Suspense
           fallback={
-            <div className="rounded-2xl bg-device-card p-8 text-device-text-secondary shadow-device">Loading fleet data…</div>
+            <div className="rounded-2xl bg-device-card p-8 text-device-text-secondary shadow-device">
+              Loading fleet data…
+            </div>
           }
         >
           <FleetOverview />
