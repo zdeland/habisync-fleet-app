@@ -14,7 +14,7 @@ import {
   YAxis,
 } from 'recharts';
 import { reconstructStateAt, resolveConfigAt, type DeviceTimelineData, type ReconstructedState } from '@/lib/timeline';
-import type { Device, LogLevel, LogRow, LogTag } from '@/lib/types';
+import type { Device, LogLevel, LogRow, LogTag, ProfileConfig } from '@/lib/types';
 import type { Preset } from '@/app/devices/[deviceId]/page';
 
 // Recharts needs literal colors for SVG stroke/fill — can't take Tailwind
@@ -227,10 +227,48 @@ function GaugeColumn({
       </div>
       {hasTarget && (
         <p className="mt-1.5 text-[0.8em] text-device-text-tertiary">
-          Optimal range: {low.toFixed(1)} – {high.toFixed(1)}
+          User Defined Optimal Range: {low.toFixed(1)} – {high.toFixed(1)}
           {unit}
         </p>
       )}
+    </div>
+  );
+}
+
+// Everything in profile_config that isn't a temp/humidity target — the
+// species profile itself and its light/UVB schedule — shown once to the
+// left of the gauges rather than repeated per-gauge.
+function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null }) {
+  if (!profileConfig) {
+    return (
+      <div className="flex w-full max-w-[200px] flex-1 items-center justify-center rounded-xl bg-device-surface p-4 text-center text-[0.85em] text-device-text-tertiary">
+        No profile configured
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex w-full max-w-[200px] flex-1 flex-col justify-center gap-3 rounded-xl bg-device-surface p-4">
+      <div>
+        <p className="text-[0.75em] text-device-text-tertiary">Species Profile</p>
+        <p className="text-[1.1em] font-semibold text-device-text">{profileConfig.profile}</p>
+      </div>
+      <div className="border-t border-white/10 pt-3">
+        <p className="text-[0.75em] text-device-text-tertiary">Day Light</p>
+        <p className="text-[0.85em] text-device-text">
+          {profileConfig.day_light_on} – {profileConfig.day_light_off}
+        </p>
+      </div>
+      <div>
+        <p className="text-[0.75em] text-device-text-tertiary">UVB</p>
+        <p className="text-[0.85em] text-device-text">
+          {profileConfig.uvb_on} – {profileConfig.uvb_off}
+        </p>
+      </div>
+      <div>
+        <p className="text-[0.75em] text-device-text-tertiary">Timezone</p>
+        <p className="text-[0.85em] text-device-text">{profileConfig.timezone}</p>
+      </div>
     </div>
   );
 }
@@ -441,6 +479,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
       )}
 
       <div className="mb-6 flex flex-wrap gap-8">
+        <ProfileSummary profileConfig={state.config.profileConfig} />
         <GaugeColumn
           label="Current Temperature"
           value={state.tempF}
