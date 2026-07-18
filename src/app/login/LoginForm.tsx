@@ -38,7 +38,7 @@ export default function LoginForm() {
 
   if (!isSupabaseConfigured) {
     return (
-      <p className="mt-4 text-sm text-slate-400">
+      <p className="mt-4 text-sm text-device-text-secondary">
         Set <code>NEXT_PUBLIC_SUPABASE_URL</code> and <code>NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY</code> to enable sign-in.
       </p>
     );
@@ -46,15 +46,15 @@ export default function LoginForm() {
 
   if (status === 'sent') {
     return (
-      <p className="mt-4 text-sm text-slate-300">
-        Check <span className="font-medium text-slate-100">{email}</span> for a sign-in link.
+      <p className="mt-4 text-sm text-device-text-secondary">
+        Check <span className="font-medium text-device-text">{email}</span> for a sign-in link.
       </p>
     );
   }
 
   return (
     <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-3">
-      <label className="text-sm text-slate-400" htmlFor="email">
+      <label className="text-sm text-device-text-secondary" htmlFor="email">
         Email
       </label>
       <input
@@ -63,17 +63,17 @@ export default function LoginForm() {
         required
         value={email}
         onChange={(event) => setEmail(event.target.value)}
-        className="rounded-lg border border-slate-700 bg-slate-800/70 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
+        className="rounded-lg bg-device-surface px-3 py-2 text-sm text-device-text outline-none focus:ring-2 focus:ring-device-accent"
         placeholder="you@example.com"
       />
       <button
         type="submit"
         disabled={status === 'sending'}
-        className="mt-2 rounded-lg bg-cyan-500 px-3 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-400 disabled:opacity-60"
+        className="mt-2 rounded-lg bg-device-accent px-3 py-2 text-sm font-medium text-device-screen transition hover:brightness-110 disabled:opacity-60"
       >
         {status === 'sending' ? 'Sending link…' : 'Send magic link'}
       </button>
-      {status === 'error' && <p className="text-sm text-rose-400">{errorMessage}</p>}
+      {status === 'error' && <p className="text-sm text-device-alert">{errorMessage}</p>}
     </form>
   );
 }

@@ -2,13 +2,15 @@ import Link from 'next/link';
 import { createClient, isSupabaseConfigured } from '@/lib/supabase/server';
 import { getFleetHealth, type DeviceHealth } from '@/lib/queries';
 
-const statusStyles: Record<string, string> = {
-  healthy: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
-  warning: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
-  critical: 'border-rose-500/30 bg-rose-500/10 text-rose-300',
-};
+// Mirrors the on-device "status check" component (dot + mono one-liner),
+// repurposed here for fleet-level health per docs/style-guide.md §8.
+const STATUS_META = {
+  healthy: { dot: 'bg-device-good', label: 'HEALTHY' },
+  warning: { dot: 'bg-device-heating', label: 'NEEDS ATTENTION' },
+  critical: { dot: 'bg-device-alert', label: 'CRITICAL' },
+} as const;
 
-function deriveStatus({ isStale, recentErrorCount }: DeviceHealth): keyof typeof statusStyles {
+function deriveStatus({ isStale, recentErrorCount }: DeviceHealth): keyof typeof STATUS_META {
   if (isStale || recentErrorCount >= 5) return 'critical';
   if (recentErrorCount >= 1) return 'warning';
   return 'healthy';
@@ -24,7 +26,7 @@ function formatLastSeen(lastSeen: string, isStale: boolean): string {
 export default async function FleetOverview() {
   if (!isSupabaseConfigured) {
     return (
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-8 text-sm text-slate-400">
+      <section className="rounded-2xl bg-device-card p-8 text-sm text-device-text-secondary shadow-device">
         Set <code>NEXT_PUBLIC_SUPABASE_URL</code> and <code>NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY</code> to load fleet data.
       </section>
     );
@@ -34,25 +36,23 @@ export default async function FleetOverview() {
   const fleet = supabase ? await getFleetHealth(supabase) : [];
 
   return (
-    <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-black/20">
+    <section className="rounded-2xl bg-device-card p-6 shadow-device">
       <div className="mb-4 flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-semibold">Device health</h2>
-          <p className="text-sm text-slate-400">What needs attention right now, across the fleet.</p>
+          <h2 className="text-[1.1em]">Device health</h2>
+          <p className="text-sm text-device-text-secondary">What needs attention right now, across the fleet.</p>
         </div>
-        <div className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-sm text-slate-300">
+        <div className="rounded-full bg-device-surface px-3 py-1 text-sm text-device-text-secondary">
           {fleet.length} device{fleet.length === 1 ? '' : 's'}
         </div>
       </div>
 
       {fleet.length === 0 ? (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-8 text-sm text-slate-400">
-          No devices reporting yet.
-        </div>
+        <div className="rounded-xl bg-device-surface p-8 text-sm text-device-text-secondary">No devices reporting yet.</div>
       ) : (
-        <div className="overflow-hidden rounded-xl border border-slate-800">
-          <table className="min-w-full divide-y divide-slate-800 text-left text-sm">
-            <thead className="bg-slate-800/80 text-slate-300">
+        <div className="overflow-hidden rounded-xl">
+          <table className="min-w-full divide-y divide-white/10 text-left text-sm">
+            <thead className="bg-device-surface text-device-text-secondary">
               <tr>
                 <th className="px-4 py-3 font-medium">Device</th>
                 <th className="px-4 py-3 font-medium">Last seen</th>
@@ -62,32 +62,36 @@ export default async function FleetOverview() {
                 <th className="px-4 py-3 font-medium">Status</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800 bg-slate-900/70">
+            <tbody className="divide-y divide-white/10">
               {fleet.map((entry) => {
-                const status = deriveStatus(entry);
+                const status = STATUS_META[deriveStatus(entry)];
                 return (
-                  <tr key={entry.device.device_id} className="transition hover:bg-slate-800/50">
+                  <tr key={entry.device.device_id} className="transition hover:bg-device-surface-hover">
                     <td className="px-4 py-3">
-                      <Link href={`/devices/${entry.device.device_id}`} className="font-medium text-slate-100 hover:text-cyan-300 hover:underline">
+                      <Link
+                        href={`/devices/${entry.device.device_id}`}
+                        className="font-medium text-device-text hover:text-device-accent hover:underline"
+                      >
                         {entry.device.name}
                       </Link>
-                      <div className="text-xs text-slate-500">{entry.device.device_id}</div>
+                      <div className="text-xs text-device-text-tertiary">{entry.device.device_id}</div>
                     </td>
-                    <td className="px-4 py-3 text-slate-300">
+                    <td className="px-4 py-3 text-device-text-secondary">
                       {formatLastSeen(entry.device.last_seen, entry.isStale)}
                     </td>
-                    <td className="px-4 py-3 text-slate-300">{entry.device.fw_version}</td>
-                    <td className="px-4 py-3 text-slate-300">{entry.device.active_backend}</td>
-                    <td className="px-4 py-3 text-slate-300">
+                    <td className="px-4 py-3 text-device-text-secondary">{entry.device.fw_version}</td>
+                    <td className="px-4 py-3 text-device-text-secondary">{entry.device.active_backend}</td>
+                    <td className="px-4 py-3 text-device-text-secondary">
                       {entry.latestTelemetry
                         ? `${entry.latestTelemetry.temp_f.toFixed(1)}°F / ${entry.latestTelemetry.hum}%`
                         : '—'}
                     </td>
                     <td className="px-4 py-3">
-                      <div className={`inline-flex rounded-full border px-3 py-1 text-xs font-medium ${statusStyles[status]}`}>
-                        {status}
+                      <div className="flex items-center gap-2 font-mono text-xs">
+                        <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${status.dot}`} />
+                        <span>{status.label}</span>
                       </div>
-                      <div className="mt-2 text-xs text-slate-500">
+                      <div className="mt-1 text-xs text-device-text-tertiary">
                         {entry.recentErrorCount} error{entry.recentErrorCount === 1 ? '' : 's'} (24h)
                       </div>
                     </td>

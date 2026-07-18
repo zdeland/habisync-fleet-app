@@ -9,19 +9,19 @@ export default async function HomePage() {
   await requireUser();
 
   return (
-    <main className="min-h-screen bg-slate-950 p-6 text-slate-100">
+    <main className="min-h-screen bg-device-screen p-6 text-device-text">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
-        <header className="rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-black/20">
+        <header className="rounded-2xl bg-device-card p-6 shadow-device">
           <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <div>
-              <p className="text-sm uppercase tracking-[0.3em] text-cyan-400">HabiSync Fleet Monitor</p>
+              <p className="text-sm uppercase tracking-[0.3em] text-device-accent">HabiSync Fleet Monitor</p>
               <h1 className="text-3xl font-semibold">Fleet overview</h1>
-              <p className="mt-2 max-w-2xl text-sm text-slate-400">
+              <p className="mt-2 max-w-2xl text-sm text-device-text-secondary">
                 Review device health, recent activity, and early warning signals from the fleet.
               </p>
             </div>
             <div className="flex items-center gap-3">
-              <div className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-300">
+              <div className="rounded-full border border-device-good/30 bg-device-good/10 px-4 py-2 text-sm text-device-good">
                 Read-only monitoring workspace
               </div>
               {isSupabaseConfigured && <SignOutButton />}
@@ -30,7 +30,11 @@ export default async function HomePage() {
         </header>
 
         <AutoRefresh intervalMs={20_000} />
-        <Suspense fallback={<div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-8 text-slate-400">Loading fleet data…</div>}>
+        <Suspense
+          fallback={
+            <div className="rounded-2xl bg-device-card p-8 text-device-text-secondary shadow-device">Loading fleet data…</div>
+          }
+        >
           <FleetOverview />
         </Suspense>
       </div>

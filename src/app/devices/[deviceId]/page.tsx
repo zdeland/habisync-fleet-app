@@ -32,8 +32,8 @@ export default async function DeviceTimelinePage({
 
   if (!isSupabaseConfigured) {
     return (
-      <main className="min-h-screen bg-slate-950 p-6 text-slate-100">
-        <div className="mx-auto max-w-7xl rounded-2xl border border-slate-800 bg-slate-900/80 p-8 text-sm text-slate-400">
+      <main className="min-h-screen bg-device-screen p-6 text-device-text">
+        <div className="mx-auto max-w-7xl rounded-2xl bg-device-card p-8 text-sm text-device-text-secondary shadow-device">
           Set <code>NEXT_PUBLIC_SUPABASE_URL</code> and <code>NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY</code> to load
           device data.
         </div>
@@ -58,14 +58,14 @@ export default async function DeviceTimelinePage({
       : null;
 
   return (
-    <main className="min-h-screen bg-slate-950 p-6 text-slate-100">
+    <main className="min-h-screen bg-device-screen p-6 text-device-text">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
-        <header className="rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-xl shadow-black/20">
-          <Link href="/" className="text-sm text-cyan-400 hover:underline">
+        <header className="rounded-2xl bg-device-card p-6 shadow-device">
+          <Link href="/" className="text-sm text-device-accent hover:underline">
             ← Fleet overview
           </Link>
           <h1 className="mt-2 text-2xl font-semibold">{data.device.name}</h1>
-          <p className="text-sm text-slate-500">{data.device.device_id}</p>
+          <p className="text-sm text-device-text-tertiary">{data.device.device_id}</p>
         </header>
 
         {/* Only auto-refresh a rolling preset window — a custom from/to range is a
