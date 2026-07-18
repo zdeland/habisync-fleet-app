@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import AutoRefresh from '@/components/AutoRefresh';
 import { requireUser } from '@/lib/supabase/auth';
 import { createClient, isSupabaseConfigured } from '@/lib/supabase/server';
 import { getDeviceTimelineData } from '@/lib/timeline';
@@ -67,6 +68,9 @@ export default async function DeviceTimelinePage({
           <p className="text-sm text-slate-500">{data.device.device_id}</p>
         </header>
 
+        {/* Only auto-refresh a rolling preset window — a custom from/to range is a
+            fixed historical query the user is studying, not a "keep watching" view. */}
+        {activePreset && <AutoRefresh intervalMs={20_000} />}
         <DeviceTimeline data={data} range={{ from, to }} preset={activePreset} retentionWarning={retentionWarning} />
       </div>
     </main>

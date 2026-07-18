@@ -1,4 +1,5 @@
 import { Suspense } from 'react';
+import AutoRefresh from '@/components/AutoRefresh';
 import FleetOverview from '@/components/FleetOverview';
 import SignOutButton from '@/components/SignOutButton';
 import { requireUser } from '@/lib/supabase/auth';
@@ -28,6 +29,7 @@ export default async function HomePage() {
           </div>
         </header>
 
+        <AutoRefresh intervalMs={20_000} />
         <Suspense fallback={<div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-8 text-slate-400">Loading fleet data…</div>}>
           <FleetOverview />
         </Suspense>
