@@ -24,7 +24,7 @@ export default async function FleetOverview() {
   if (!isSupabaseConfigured) {
     return (
       <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-8 text-sm text-slate-400">
-        Set <code>NEXT_PUBLIC_SUPABASE_URL</code> and <code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code> to load fleet data.
+        Set <code>NEXT_PUBLIC_SUPABASE_URL</code> and <code>NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY</code> to load fleet data.
       </section>
     );
   }

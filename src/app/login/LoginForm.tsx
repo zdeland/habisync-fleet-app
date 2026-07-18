@@ -39,7 +39,7 @@ export default function LoginForm() {
   if (!isSupabaseConfigured) {
     return (
       <p className="mt-4 text-sm text-slate-400">
-        Set <code>NEXT_PUBLIC_SUPABASE_URL</code> and <code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code> to enable sign-in.
+        Set <code>NEXT_PUBLIC_SUPABASE_URL</code> and <code>NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY</code> to enable sign-in.
       </p>
     );
   }
