@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { createClient, isSupabaseConfigured } from '@/lib/supabase/server';
 import { getFleetHealth, type DeviceHealth } from '@/lib/queries';
 
@@ -67,7 +68,9 @@ export default async function FleetOverview() {
                 return (
                   <tr key={entry.device.device_id} className="transition hover:bg-slate-800/50">
                     <td className="px-4 py-3">
-                      <div className="font-medium text-slate-100">{entry.device.name}</div>
+                      <Link href={`/devices/${entry.device.device_id}`} className="font-medium text-slate-100 hover:text-cyan-300 hover:underline">
+                        {entry.device.name}
+                      </Link>
                       <div className="text-xs text-slate-500">{entry.device.device_id}</div>
                     </td>
                     <td className="px-4 py-3 text-slate-300">
