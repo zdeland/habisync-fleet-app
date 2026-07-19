@@ -202,13 +202,21 @@ export function reconstructStateAt(data: DeviceTimelineData, t: string): Reconst
 
   const outlets: OutletState[] = config.outletRoles.map((role, index) => {
     const transition = lastTransitionByIndex.get(index) ?? null;
+    const on = mask == null ? null : Boolean(mask & (1 << index));
+    // A transition's message/timestamp only actually describes the current
+    // on/off state if its own logged outlet_state agrees with it. When it
+    // doesn't — e.g. the outlet flipped again without going through the
+    // event-logging path (a manual toggle, a firmware gap) — showing that
+    // stale reason/timestamp as if it explains the current state is actively
+    // misleading, not just outdated: it describes a DIFFERENT transition.
+    const reasonMatchesCurrentState = transition != null && transition.outlet_state === on;
     return {
       index,
       role,
-      on: mask == null ? null : Boolean(mask & (1 << index)),
-      since: transition?.created_at ?? null,
-      sinceDeviceTime: transition?.device_time ?? null,
-      reason: transition?.message ?? null,
+      on,
+      since: reasonMatchesCurrentState ? transition.created_at : null,
+      sinceDeviceTime: reasonMatchesCurrentState ? transition.device_time : null,
+      reason: reasonMatchesCurrentState ? transition.message : null,
     };
   });
 
