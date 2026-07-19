@@ -18,6 +18,7 @@ import { deriveHealthEvents, findTelemetryGaps, mergeTimelineEntries, type Timel
 import type { Device, LogLevel, LogRow, LogTag, ProfileConfig } from '@/lib/types';
 import { celsiusDeltaToFahrenheit, celsiusToFahrenheit, tempRangeC } from '@/lib/units';
 import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
+import { GAUGE_COLORS } from '@/lib/gaugeColors';
 import type { Preset } from '@/app/devices/[deviceId]/page';
 
 // Recharts needs literal colors for SVG stroke/fill — can't take Tailwind
@@ -170,44 +171,6 @@ function iconForLog(row: LogRow, device: Device, configLogs: LogRow[]) {
   }
   return TAG_ICONS[row.tag] ?? '🔔';
 }
-
-// Zone/badge colors as both a literal hex (for the gauge's SVG arcs, which
-// can't take Tailwind classes) and the matching Tailwind class (for the
-// badge below it) — kept as one pair per role so the two never drift apart.
-// `className` (solid fill) still backs the gauge zone colors' Tailwind
-// equivalent and the small status dots; `badgeClassName` is the outline
-// style — border + tinted background + colored text reads better than
-// white-on-color at these small badge sizes, especially against the dark
-// gray "disabled" color where solid-fill white text had poor contrast.
-// Full literal strings (not built via interpolation) since Tailwind's
-// scanner needs to see the complete class name in source to generate it.
-const GAUGE_COLORS = {
-  cool: {
-    hex: '#4299E1', // temp below target
-    className: 'bg-device-cool',
-    badgeClassName: 'border border-device-cool/40 bg-device-cool/10 text-device-cool',
-  },
-  dry: {
-    hex: '#C05621', // humidity below target
-    className: 'bg-device-dry',
-    badgeClassName: 'border border-device-dry/40 bg-device-dry/10 text-device-dry',
-  },
-  good: {
-    hex: '#48BB78',
-    className: 'bg-device-good',
-    badgeClassName: 'border border-device-good/40 bg-device-good/10 text-device-good',
-  },
-  alert: {
-    hex: '#F56565',
-    className: 'bg-device-alert',
-    badgeClassName: 'border border-device-alert/40 bg-device-alert/10 text-device-alert',
-  },
-  neutral: {
-    hex: '#333',
-    className: 'bg-device-disabled',
-    badgeClassName: 'border border-device-disabled/40 bg-device-disabled/10 text-device-disabled',
-  },
-};
 
 // docs/style-guide.md §6 — hand-drawn semicircle gauge, viewBox 0 0 200 120,
 // center (100,100), radius 80, 16px zone arcs, needle + center dot. Domain

@@ -3,7 +3,10 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { CRITICAL_ERROR_COUNT, WARNING_ERROR_COUNT, type DeviceHealth } from '@/lib/queries';
-import { celsiusToFahrenheit } from '@/lib/units';
+import { celsiusToFahrenheit, tempRangeC } from '@/lib/units';
+import { GAUGE_COLORS } from '@/lib/gaugeColors';
+import { compareFwVersions } from '@/lib/version';
+import type { TelemetryRow, ProfileConfig } from '@/lib/types';
 
 // Mirrors the on-device "status check" component (dot + mono one-liner),
 // repurposed here for fleet-level health per docs/style-guide.md §8.
@@ -19,6 +22,65 @@ function deriveStatus({ isStale, recentErrorCount }: DeviceHealth): keyof typeof
   return 'healthy';
 }
 
+// Simple snapshot compare against the user-defined range — unlike the device
+// timeline's gauges, the fleet table only has the latest telemetry point (no
+// history to replay through automation.ts), so there's no hysteresis or
+// shared-outlet ambiguity to resolve here, just "is the latest reading
+// inside the target band right now."
+function deriveRangeBadge(
+  value: number | null,
+  low: number | undefined,
+  high: number | undefined,
+  enabled: boolean,
+  lowLabel: string,
+  highLabel: string,
+  lowColor: typeof GAUGE_COLORS.cool,
+): { className: string; label: string } {
+  if (!enabled || low == null || high == null) {
+    return { className: GAUGE_COLORS.neutral.badgeClassName, label: enabled ? 'NO TARGET' : 'DISABLED' };
+  }
+  if (value == null) return { className: GAUGE_COLORS.neutral.badgeClassName, label: 'NO DATA' };
+  if (value < low) return { className: lowColor.badgeClassName, label: lowLabel };
+  if (value > high) return { className: GAUGE_COLORS.alert.badgeClassName, label: highLabel };
+  return { className: GAUGE_COLORS.good.badgeClassName, label: 'IN RANGE' };
+}
+
+function RangeCell({ value, unit, badge }: { value: number | null; unit: string; badge: { className: string; label: string } }) {
+  return (
+    <td className="px-4 py-3">
+      <div className="font-mono text-device-text">{value != null ? `${value.toFixed(1)}${unit}` : '—'}</div>
+      <div className={`mt-1 inline-block rounded px-2 py-0.5 text-[0.7em] font-mono font-semibold ${badge.className}`}>
+        {badge.label}
+      </div>
+    </td>
+  );
+}
+
+function deriveTempBadge(telemetry: TelemetryRow | null, profileConfig: ProfileConfig): { className: string; label: string } {
+  const range = tempRangeC(profileConfig);
+  return deriveRangeBadge(
+    telemetry ? celsiusToFahrenheit(telemetry.temp_c) : null,
+    range ? celsiusToFahrenheit(range.low) : undefined,
+    range ? celsiusToFahrenheit(range.high) : undefined,
+    profileConfig.enabled,
+    'TOO COLD',
+    'TOO HOT',
+    GAUGE_COLORS.cool,
+  );
+}
+
+function deriveHumidityBadge(telemetry: TelemetryRow | null, profileConfig: ProfileConfig): { className: string; label: string } {
+  return deriveRangeBadge(
+    telemetry?.hum ?? null,
+    profileConfig.hum_low,
+    profileConfig.hum_high,
+    profileConfig.enabled,
+    'TOO DRY',
+    'TOO HUMID',
+    GAUGE_COLORS.dry,
+  );
+}
+
 function formatLastSeen(lastSeen: string, isStale: boolean): string {
   const diffMs = Date.now() - new Date(lastSeen).getTime();
   const diffMin = Math.round(diffMs / 60_000);
@@ -29,23 +91,38 @@ function formatLastSeen(lastSeen: string, isStale: boolean): string {
 export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
   const router = useRouter();
 
+  // "Latest" here means the newest version reported anywhere in this fleet
+  // right now — there's no external firmware release feed this read-only
+  // app can check against, only what devices have actually reported.
+  const latestFwVersion = fleet.reduce<string | null>(
+    (latest, entry) =>
+      latest == null || compareFwVersions(entry.device.fw_version, latest) > 0 ? entry.device.fw_version : latest,
+    null,
+  );
+
   return (
     <div className="overflow-hidden rounded-xl">
       <table className="min-w-full divide-y divide-white/10 text-left text-sm">
         <thead className="bg-device-surface text-device-text-secondary">
           <tr>
             <th className="px-4 py-3 font-medium">Device</th>
+            <th className="px-4 py-3 font-medium">Status</th>
+            <th className="px-4 py-3 font-medium">Temp</th>
+            <th className="px-4 py-3 font-medium">Humidity</th>
             <th className="px-4 py-3 font-medium">Last seen</th>
             <th className="px-4 py-3 font-medium">Firmware</th>
             <th className="px-4 py-3 font-medium">Backend</th>
-            <th className="px-4 py-3 font-medium">Temp / Hum</th>
-            <th className="px-4 py-3 font-medium">Status</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-white/10">
           {fleet.map((entry) => {
             const status = STATUS_META[deriveStatus(entry)];
             const href = `/devices/${entry.device.device_id}`;
+            const tempF = entry.latestTelemetry ? celsiusToFahrenheit(entry.latestTelemetry.temp_c) : null;
+            const tempBadge = deriveTempBadge(entry.latestTelemetry, entry.device.profile_config);
+            const humBadge = deriveHumidityBadge(entry.latestTelemetry, entry.device.profile_config);
+            const isOutdated =
+              latestFwVersion != null && compareFwVersions(entry.device.fw_version, latestFwVersion) < 0;
             return (
               <tr
                 key={entry.device.device_id}
@@ -62,16 +139,6 @@ export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
                   </Link>
                   <div className="text-xs text-device-text-tertiary">{entry.device.device_id}</div>
                 </td>
-                <td className="px-4 py-3 text-device-text-secondary">
-                  {formatLastSeen(entry.device.last_seen, entry.isStale)}
-                </td>
-                <td className="px-4 py-3 text-device-text-secondary">{entry.device.fw_version}</td>
-                <td className="px-4 py-3 text-device-text-secondary">{entry.device.active_backend}</td>
-                <td className="px-4 py-3 text-device-text-secondary">
-                  {entry.latestTelemetry
-                    ? `${celsiusToFahrenheit(entry.latestTelemetry.temp_c).toFixed(1)}°F / ${entry.latestTelemetry.hum}%`
-                    : '—'}
-                </td>
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2 font-mono text-xs">
                     <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${status.dot}`} />
@@ -81,6 +148,20 @@ export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
                     {entry.recentErrorCount} error{entry.recentErrorCount === 1 ? '' : 's'} (24h)
                   </div>
                 </td>
+                <RangeCell value={tempF} unit="°F" badge={tempBadge} />
+                <RangeCell value={entry.latestTelemetry?.hum ?? null} unit="%" badge={humBadge} />
+                <td className="px-4 py-3 text-device-text-secondary">
+                  {formatLastSeen(entry.device.last_seen, entry.isStale)}
+                </td>
+                <td className="px-4 py-3 text-device-text-secondary">
+                  <span className={isOutdated ? 'text-device-heating' : undefined}>{entry.device.fw_version}</span>
+                  {isOutdated && (
+                    <div className="mt-1 inline-block rounded px-2 py-0.5 text-[0.7em] font-mono font-semibold border border-device-heating/40 bg-device-heating/10 text-device-heating">
+                      OUTDATED
+                    </div>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-device-text-secondary">{entry.device.active_backend}</td>
               </tr>
             );
           })}
