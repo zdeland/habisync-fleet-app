@@ -90,10 +90,51 @@ export type TelemetryRow = {
   rssi: number;
 };
 
-// This app only ever reads these tables (writes come from the on-device anon
-// key, never the browser — see docs/monitoring-webapp-plan.md §2), so
-// Insert/Update are placeholders to satisfy postgrest-js's generic shape
-// rather than types this app actually uses.
+export type OutletAlertStatus = 'open' | 'escalated' | 'closed';
+
+// Webapp-owned workflow table — NOT part of the device-reported schema above
+// (devices/logs/telemetry are firmware ground truth; this app never writes
+// to those). See supabase/outlet_alerts.sql for the migration and
+// docs/outlet-alerts.md for the feature this backs, per
+// docs/monitoring-webapp-plan.md §6's allowance for "authenticated writes
+// for notes and remediation actions in its own workflow tables."
+export type OutletAlertRow = {
+  id: number;
+  device_id: string;
+  outlet_index: number;
+  status: OutletAlertStatus;
+  // Snapshot of the detected mismatch as of this alert's creation/last
+  // re-open — kept even if the logs/telemetry it was computed from later
+  // age out of retention.
+  role: string;
+  logged_state: boolean;
+  actual_state: boolean;
+  last_logged_message: string;
+  last_logged_at: string;
+  mismatch_since: string;
+  detected_at: string;
+  updated_at: string;
+  closed_at: string | null;
+  closed_by: string | null;
+  escalated_at: string | null;
+  escalated_by: string | null;
+  note: string | null;
+};
+
+// Read-only projection of auth.users (id, email) — see
+// supabase/outlet_alert_actors.sql — so the alert history can show who
+// closed/escalated an alert. Never anything beyond these two columns.
+export type OutletAlertActorRow = {
+  id: string;
+  email: string | null;
+};
+
+// devices/logs/telemetry: this app only ever reads these tables (writes come
+// from the on-device anon key, never the browser — see
+// docs/monitoring-webapp-plan.md §2), so Insert/Update are placeholders to
+// satisfy postgrest-js's generic shape rather than types this app actually
+// uses. outlet_alerts is the one exception — a table this webapp owns
+// end-to-end, including writes (see src/lib/alerts.ts).
 export type Database = {
   public: {
     Tables: {
@@ -105,8 +146,16 @@ export type Database = {
         Update: Partial<TelemetryRow>;
         Relationships: [];
       };
+      outlet_alerts: {
+        Row: OutletAlertRow;
+        Insert: Partial<OutletAlertRow>;
+        Update: Partial<OutletAlertRow>;
+        Relationships: [];
+      };
     };
-    Views: { [_ in never]: never };
+    Views: {
+      outlet_alert_actors: { Row: OutletAlertActorRow; Relationships: [] };
+    };
     Functions: { [_ in never]: never };
     Enums: { [_ in never]: never };
     CompositeTypes: { [_ in never]: never };

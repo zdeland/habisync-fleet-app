@@ -15,10 +15,13 @@ import {
 } from 'recharts';
 import { reconstructStateAt, resolveConfigAt, type DeviceTimelineData, type ReconstructedState } from '@/lib/timeline';
 import { deriveHealthEvents, findTelemetryGaps, mergeTimelineEntries, type TimelineEntry } from '@/lib/health';
-import type { Device, LogLevel, LogRow, LogTag, ProfileConfig } from '@/lib/types';
+import { OUTLET_MISMATCH_DEBOUNCE_SAMPLES } from '@/lib/queries';
+import type { Device, LogLevel, LogRow, LogTag, ProfileConfig, OutletAlertRow } from '@/lib/types';
 import { celsiusDeltaToFahrenheit, celsiusToFahrenheit, tempRangeC } from '@/lib/units';
 import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
 import { GAUGE_COLORS } from '@/lib/gaugeColors';
+import { closeOutletAlert, escalateOutletAlert } from '@/app/devices/[deviceId]/actions';
+import type { OutletAlertHistoryEntry } from '@/lib/alerts';
 import type { Preset } from '@/app/devices/[deviceId]/page';
 
 // Recharts needs literal colors for SVG stroke/fill — can't take Tailwind
@@ -122,6 +125,14 @@ function reasonBadgeColor(reason: string): typeof GAUGE_COLORS.good {
   if (text.includes('below') || text.includes('low') || text.includes('under')) return GAUGE_COLORS.cool;
   if (text.includes('above') || text.includes('high') || text.includes('ceiling') || text.includes('over')) {
     return GAUGE_COLORS.alert;
+  }
+  // Not a climate-triggered decision at all — a boot/reconnect default-off,
+  // an outlet-backend switch, or a state change made outside firmware
+  // control (Kasa app, strip's own scheduling, a manual press). See
+  // docs/firmware-outlet-logging-gaps-fixed.md. "good" green would wrongly
+  // imply a climate outcome here; neutral reads as purely informational.
+  if (text.includes('kasa') || text.includes('backend') || text.includes('outside firmware control')) {
+    return GAUGE_COLORS.neutral;
   }
   return GAUGE_COLORS.good;
 }
@@ -408,11 +419,15 @@ export default function DeviceTimeline({
   range,
   preset,
   retentionWarning,
+  outletAlerts,
+  outletAlertHistory,
 }: {
   data: DeviceTimelineData;
   range: { from: string; to: string };
   preset: Preset | null;
   retentionWarning: string | null;
+  outletAlerts: OutletAlertRow[];
+  outletAlertHistory: OutletAlertHistoryEntry[];
 }) {
   const fromMs = new Date(range.from).getTime();
   const toMs = new Date(range.to).getTime();
@@ -590,6 +605,8 @@ export default function DeviceTimeline({
 
   return (
     <div className="flex flex-col gap-6">
+      <AttentionCard items={outletAlerts} deviceId={data.device.device_id} />
+
       <section className="rounded-2xl bg-device-card p-6 shadow-device">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-2">
@@ -790,6 +807,107 @@ export default function DeviceTimeline({
 
       <ContextPanel state={state} />
       <EventLog data={data} entries={timelineEntries} />
+      <AlertHistorySection entries={outletAlertHistory} />
+    </div>
+  );
+}
+
+// docs/outlet-alerts.md: a persisted, human-managed alert (open until
+// someone closes or escalates it) for an outlet whose actual state
+// (telemetry.outlet_mask) disagreed with its last logged tag='event'
+// transition for OUTLET_MISMATCH_DEBOUNCE_SAMPLES consecutive samples —
+// long enough to rule out the ordinary lag between a real flip and its
+// event row landing (docs/automation-rules.md §9). Renders nothing when
+// there's nothing active.
+function AttentionCard({ items, deviceId }: { items: OutletAlertRow[]; deviceId: string }) {
+  if (items.length === 0) return null;
+
+  return (
+    <section className="rounded-2xl border border-device-alert/40 bg-device-alert/10 p-6 shadow-device">
+      <h2 className="mb-1 flex items-center gap-2 text-[1.1em] font-semibold text-device-alert">
+        <span>⚠️</span> Needs attention
+      </h2>
+      <p className="mb-4 text-[0.8em] text-device-text-secondary">
+        {items.length} outlet{items.length === 1 ? '' : 's'} changed state without a matching logged transition —
+        the actual state disagreed with the last <span className="font-mono">tag=&apos;event&apos;</span> row for{' '}
+        {OUTLET_MISMATCH_DEBOUNCE_SAMPLES} consecutive telemetry samples in a row. Close it once you&apos;ve
+        confirmed it&apos;s expected, or escalate it to get fixed.
+      </p>
+      <div className="flex flex-col gap-3">
+        {items.map((item) => (
+          <AttentionAlertItem key={item.id} item={item} deviceId={deviceId} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AttentionAlertItem({ item, deviceId }: { item: OutletAlertRow; deviceId: string }) {
+  const [isPending, setIsPending] = useState(false);
+
+  async function handleClose() {
+    setIsPending(true);
+    try {
+      await closeOutletAlert(item.id, deviceId);
+    } finally {
+      setIsPending(false);
+    }
+  }
+
+  async function handleEscalate() {
+    setIsPending(true);
+    try {
+      await escalateOutletAlert(item.id, deviceId);
+    } finally {
+      setIsPending(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl bg-device-card p-4">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="text-[1.3em]">{iconForRole(item.role)}</span>
+        <span className="font-medium text-device-text">{item.role}</span>
+        <span
+          className={`rounded px-2 py-0.5 text-[0.7em] font-mono font-semibold ${
+            item.status === 'escalated' ? 'bg-device-heating/15 text-device-heating' : 'bg-device-alert/15 text-device-alert'
+          }`}
+        >
+          {item.status === 'escalated' ? 'ESCALATED' : 'OPEN'}
+        </span>
+        <span className="ml-auto rounded bg-device-alert/15 px-2 py-0.5 text-[0.7em] font-mono font-semibold text-device-alert">
+          ACTUALLY {item.actual_state ? 'ON' : 'OFF'}
+        </span>
+      </div>
+      <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-[0.8em]">
+        <dt className="text-device-text-tertiary">Last logged</dt>
+        <dd className="text-device-text">
+          {item.logged_state ? 'ON' : 'OFF'} — {reasonOnly(item.last_logged_message)}{' '}
+          <span className="text-device-text-tertiary">({displayTime(item.last_logged_at, null)})</span>
+        </dd>
+        <dt className="text-device-text-tertiary">Mismatch since</dt>
+        <dd className="text-device-text">at least {displayTime(item.mismatch_since, null)}</dd>
+      </dl>
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          disabled={isPending}
+          onClick={handleClose}
+          className="rounded bg-device-surface px-3 py-1 text-xs text-device-text-secondary transition hover:bg-device-surface-hover disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Close
+        </button>
+        {item.status !== 'escalated' && (
+          <button
+            type="button"
+            disabled={isPending}
+            onClick={handleEscalate}
+            className="rounded bg-device-alert/20 px-3 py-1 text-xs font-semibold text-device-alert transition hover:bg-device-alert/30 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Escalate
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -949,6 +1067,69 @@ function EventLog({ data, entries }: { data: DeviceTimelineData; entries: Timeli
               </div>
             );
           })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+const HISTORY_STATUS_META: Record<OutletAlertRow['status'], { label: string; className: string }> = {
+  open: { label: 'OPEN', className: 'bg-device-alert/15 text-device-alert' },
+  escalated: { label: 'ESCALATED', className: 'bg-device-heating/15 text-device-heating' },
+  closed: { label: 'CLOSED', className: GAUGE_COLORS.neutral.badgeClassName },
+};
+
+// docs/outlet-alerts.md: every outlet_alerts row ever created for this
+// device, newest first — a full audit trail of what was flagged and how it
+// was resolved (or that it's still open), not just the currently-active
+// ones the AttentionCard above shows.
+function AlertHistorySection({ entries }: { entries: OutletAlertHistoryEntry[] }) {
+  return (
+    <section className="rounded-2xl bg-device-card p-6 shadow-device">
+      <h2 className="mb-4 text-[1.1em] text-device-text">Alert history</h2>
+
+      {entries.length === 0 ? (
+        <div className="rounded-xl bg-device-surface p-8 text-sm text-device-text-secondary">
+          No outlet alerts recorded for this device.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2.5">
+          {entries.map((entry) => (
+            <div key={entry.id} className="flex items-start gap-3 rounded-lg bg-device-surface px-3 py-2.5">
+              <div className="w-[26px] flex-shrink-0 text-center text-[1.3em]">{iconForRole(entry.role)}</div>
+              <div className="flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-device-text">{entry.role}</span>
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-[0.7em] font-mono font-semibold ${HISTORY_STATUS_META[entry.status].className}`}
+                  >
+                    {HISTORY_STATUS_META[entry.status].label}
+                  </span>
+                  <span className="text-[0.75em] text-device-text-tertiary">
+                    detected {displayTime(entry.detected_at, null)}
+                  </span>
+                </div>
+                <div className="mt-0.5 text-[0.85em] text-device-text">
+                  {entry.logged_state ? 'ON' : 'OFF'} — {reasonOnly(entry.last_logged_message)}
+                </div>
+                <div className="mt-1 flex flex-col gap-0.5 text-[0.75em] text-device-text-tertiary">
+                  {entry.escalated_at && (
+                    <span>
+                      Escalated {displayTime(entry.escalated_at, null)}
+                      {entry.escalatedByEmail ? ` by ${entry.escalatedByEmail}` : ''}
+                    </span>
+                  )}
+                  {entry.closed_at && (
+                    <span>
+                      Closed {displayTime(entry.closed_at, null)}
+                      {entry.closedByEmail ? ` by ${entry.closedByEmail}` : ''}
+                    </span>
+                  )}
+                  {entry.status === 'open' && <span>Still open</span>}
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </section>

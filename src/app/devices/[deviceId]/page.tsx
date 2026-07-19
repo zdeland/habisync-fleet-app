@@ -4,6 +4,9 @@ import AutoRefresh from '@/components/AutoRefresh';
 import { requireUser } from '@/lib/supabase/auth';
 import { createClient, isSupabaseConfigured } from '@/lib/supabase/server';
 import { getDeviceTimelineData } from '@/lib/timeline';
+import { getOutletAttention } from '@/lib/queries';
+import { getActiveOutletAlerts, getOutletAlertHistory, syncOutletAlerts, type OutletAlertHistoryEntry } from '@/lib/alerts';
+import type { OutletAlertRow } from '@/lib/types';
 import DeviceTimeline from '@/components/DeviceTimeline';
 
 const PRESETS = {
@@ -52,6 +55,28 @@ export default async function DeviceTimelinePage({
 
   if (!data) notFound();
 
+  let outletAlerts: OutletAlertRow[];
+  let outletAlertHistory: OutletAlertHistoryEntry[];
+  if (supabase) {
+    const outletAttention = await getOutletAttention(supabase, data.device);
+    const snapshots = outletAttention.map((item) => ({
+      outletIndex: item.outletIndex,
+      role: item.role,
+      loggedState: item.loggedState,
+      actualState: item.actualState,
+      lastLoggedMessage: item.lastLoggedMessage,
+      lastLoggedAt: item.lastLoggedAt,
+      mismatchSince: item.mismatchSince,
+    }));
+    await syncOutletAlerts(supabase, data.device.device_id, snapshots);
+    const activeAlertsByDevice = await getActiveOutletAlerts(supabase, [data.device.device_id]);
+    outletAlerts = activeAlertsByDevice.get(data.device.device_id) ?? [];
+    outletAlertHistory = await getOutletAlertHistory(supabase, data.device.device_id);
+  } else {
+    outletAlerts = [];
+    outletAlertHistory = [];
+  }
+
   const retentionWarning =
     new Date(from).getTime() < now - TELEMETRY_RETENTION_MS
       ? 'Part of this range predates the 30-day telemetry retention window — temperature/humidity data before then is already purged.'
@@ -71,7 +96,14 @@ export default async function DeviceTimelinePage({
         {/* Only auto-refresh a rolling preset window — a custom from/to range is a
             fixed historical query the user is studying, not a "keep watching" view. */}
         {activePreset && <AutoRefresh intervalMs={20_000} />}
-        <DeviceTimeline data={data} range={{ from, to }} preset={activePreset} retentionWarning={retentionWarning} />
+        <DeviceTimeline
+          data={data}
+          range={{ from, to }}
+          preset={activePreset}
+          retentionWarning={retentionWarning}
+          outletAlerts={outletAlerts}
+          outletAlertHistory={outletAlertHistory}
+        />
       </div>
     </main>
   );

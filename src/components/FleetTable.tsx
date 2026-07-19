@@ -6,7 +6,7 @@ import { CRITICAL_ERROR_COUNT, WARNING_ERROR_COUNT, type DeviceHealth } from '@/
 import { celsiusToFahrenheit, tempRangeC } from '@/lib/units';
 import { GAUGE_COLORS } from '@/lib/gaugeColors';
 import { compareFwVersions } from '@/lib/version';
-import type { TelemetryRow, ProfileConfig } from '@/lib/types';
+import type { TelemetryRow, ProfileConfig, OutletAlertRow } from '@/lib/types';
 
 // Mirrors the on-device "status check" component (dot + mono one-liner),
 // repurposed here for fleet-level health per docs/style-guide.md §8.
@@ -16,6 +16,10 @@ const STATUS_META = {
   critical: { dot: 'bg-device-alert', label: 'CRITICAL' },
 } as const;
 
+// Deliberately independent of outlet alerts (see the Attention column below)
+// — an open outlet alert can itself be stale/no-longer-current (it's a
+// human-managed workflow item, not a live health signal), so it's never
+// folded into this HEALTHY/WARNING/CRITICAL rollup.
 function deriveStatus({ isStale, recentErrorCount }: DeviceHealth): keyof typeof STATUS_META {
   if (isStale || recentErrorCount >= CRITICAL_ERROR_COUNT) return 'critical';
   if (recentErrorCount >= WARNING_ERROR_COUNT) return 'warning';
@@ -88,6 +92,34 @@ function formatLastSeen(lastSeen: string, isStale: boolean): string {
   return isStale ? `${label} (stale)` : label;
 }
 
+// A separate column, not a Status badge — see docs/outlet-alerts.md: these
+// are human-managed workflow items (open until someone closes/escalates
+// them via the device page) that can themselves be stale, not a live
+// health signal to blend into HEALTHY/WARNING/CRITICAL above.
+function AttentionCell({ alerts, href }: { alerts: OutletAlertRow[]; href: string }) {
+  if (alerts.length === 0) {
+    return <span className="text-xs text-device-text-tertiary">—</span>;
+  }
+
+  const openCount = alerts.filter((alert) => alert.status === 'open').length;
+  const escalatedCount = alerts.filter((alert) => alert.status === 'escalated').length;
+
+  return (
+    <Link href={href} onClick={(event) => event.stopPropagation()} className="flex w-fit flex-col gap-1">
+      {openCount > 0 && (
+        <span className="inline-flex w-fit items-center gap-1 rounded border border-device-heating/40 bg-device-heating/10 px-2 py-0.5 font-mono text-[0.7em] font-semibold text-device-heating">
+          ⚠ {openCount} open
+        </span>
+      )}
+      {escalatedCount > 0 && (
+        <span className="inline-flex w-fit items-center gap-1 rounded border border-device-alert/40 bg-device-alert/10 px-2 py-0.5 font-mono text-[0.7em] font-semibold text-device-alert">
+          🚩 {escalatedCount} escalated
+        </span>
+      )}
+    </Link>
+  );
+}
+
 export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
   const router = useRouter();
 
@@ -107,6 +139,7 @@ export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
           <tr>
             <th className="px-4 py-3 font-medium">Device</th>
             <th className="px-4 py-3 font-medium">Status</th>
+            <th className="px-4 py-3 font-medium">Attention</th>
             <th className="px-4 py-3 font-medium">Temp</th>
             <th className="px-4 py-3 font-medium">Humidity</th>
             <th className="px-4 py-3 font-medium">Last seen</th>
@@ -147,6 +180,9 @@ export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
                   <div className="mt-1 text-xs text-device-text-tertiary">
                     {entry.recentErrorCount} error{entry.recentErrorCount === 1 ? '' : 's'} (24h)
                   </div>
+                </td>
+                <td className="px-4 py-3">
+                  <AttentionCell alerts={entry.activeOutletAlerts} href={href} />
                 </td>
                 <RangeCell value={tempF} unit="°F" badge={tempBadge} />
                 <RangeCell value={entry.latestTelemetry?.hum ?? null} unit="%" badge={humBadge} />
