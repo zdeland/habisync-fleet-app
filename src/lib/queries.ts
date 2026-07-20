@@ -39,6 +39,18 @@ export interface DeviceHealth {
   activeOutletAlerts: OutletAlertRow[];
 }
 
+// A brand-new device routinely reports a mismatch for a few minutes while
+// its outlets are still being wired/paired (a Kasa plug not joined yet, a
+// relay not yet under firmware control) — the last logged transition is
+// just a boot default, not a real disagreement, but computeOutletMismatches
+// can't tell those apart from a genuine firmware bug by shape alone. Since
+// outlet_alerts never auto-close once created (docs/outlet-alerts.md), a
+// mismatch flagged during this window would otherwise sit as an open
+// "Needs attention" item forever, past the point the device is fully
+// configured and reporting correctly. Suppress detection entirely until
+// this long after the device's very first-ever telemetry.
+export const NEW_DEVICE_GRACE_MS = 15 * 60 * 1000;
+
 // Exported for testing; see getFleetHealth for how it's fed.
 export function computeOutletMismatches(
   device: Device,
@@ -48,6 +60,10 @@ export function computeOutletMismatches(
   if (recentTelemetry.length < OUTLET_MISMATCH_DEBOUNCE_SAMPLES) return [];
 
   const debounceWindow = recentTelemetry.slice(0, OUTLET_MISMATCH_DEBOUNCE_SAMPLES);
+
+  const sinceFirstSeenMs = new Date(debounceWindow[0].created_at).getTime() - new Date(device.first_seen).getTime();
+  if (sinceFirstSeenMs < NEW_DEVICE_GRACE_MS) return [];
+
   const mismatches: OutletMismatch[] = [];
 
   device.outlet_roles.forEach((role, index) => {

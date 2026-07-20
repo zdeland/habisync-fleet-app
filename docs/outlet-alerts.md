@@ -10,6 +10,15 @@ consecutive telemetry samples — see
 and its fix,
 [`firmware-outlet-logging-gaps-fixed.md`](firmware-outlet-logging-gaps-fixed.md).
 
+Detection is suppressed entirely for `NEW_DEVICE_GRACE_MS` (15 min) after a
+device's `first_seen`: a brand-new device routinely reports a mismatch for
+a few minutes while its outlets are still being wired/paired (a Kasa plug
+not joined yet, a relay not yet under firmware control), where the last
+logged transition is just a boot default rather than a real disagreement.
+Since alerts never auto-close (below), one flagged during that window
+would otherwise sit open forever, long past the point the device is fully
+configured and reporting correctly.
+
 That detection alone is just a live computation — nothing persists it, so
 there was no way to acknowledge one, mark it as being worked on, or tell it
 apart from a brand new occurrence. `outlet_alerts`
