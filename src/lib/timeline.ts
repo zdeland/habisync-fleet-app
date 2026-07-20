@@ -128,6 +128,16 @@ export type OutletState = {
   since: string | null; // created_at of the transition that produced this state
   sinceDeviceTime: string | null; // that transition's device_time, if NTP-synced yet
   reason: string | null; // that transition's free-text message
+  // true when there IS a known last transition for this outlet but its
+  // logged outlet_state disagrees with the current reconstructed `on` —
+  // the same class of disagreement outlet_alerts persists once it holds
+  // for OUTLET_MISMATCH_DEBOUNCE_SAMPLES in a row (src/lib/queries.ts).
+  // `on` above is still the real, trustworthy current state (straight from
+  // telemetry) — this flag says the *log* is what's wrong/stale, not that
+  // `on` itself is in doubt. Computed per-instant so the outlet tile can
+  // say so instead of just going silent on since/reason and leaving the
+  // mismatch unexplained.
+  mismatched: boolean;
 };
 
 export type ReconstructedState = {
@@ -217,6 +227,7 @@ export function reconstructStateAt(data: DeviceTimelineData, t: string): Reconst
       since: reasonMatchesCurrentState ? transition.created_at : null,
       sinceDeviceTime: reasonMatchesCurrentState ? transition.device_time : null,
       reason: reasonMatchesCurrentState ? transition.message : null,
+      mismatched: transition != null && !reasonMatchesCurrentState,
     };
   });
 

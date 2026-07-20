@@ -1042,6 +1042,14 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
               </div>
             </div>
             <p className="text-center text-[0.8em] text-device-text-secondary">{outlet.role}</p>
+            {outlet.mismatched && (
+              <div
+                title="The ON/OFF shown here is the outlet's real, current state (from telemetry) — it's the log that's wrong: the last logged transition for this outlet says the opposite, so there's no logged reason/timestamp to show. See Needs attention above, or the Attention column on the fleet overview."
+                className={`rounded px-2 py-0.5 text-center text-[0.7em] font-mono font-semibold ${GAUGE_COLORS.alert.badgeClassName}`}
+              >
+                ⚠ UNLOGGED CHANGE
+              </div>
+            )}
             {outlet.reason &&
               (isTestReason(outlet.reason) ? (
                 <div
