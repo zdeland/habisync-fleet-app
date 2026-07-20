@@ -15,7 +15,7 @@ import {
 } from 'recharts';
 import { reconstructStateAt, resolveConfigAt, type DeviceTimelineData, type ReconstructedState } from '@/lib/timeline';
 import { deriveHealthEvents, findTelemetryGaps, mergeTimelineEntries, type TimelineEntry } from '@/lib/health';
-import { OUTLET_MISMATCH_DEBOUNCE_SAMPLES } from '@/lib/queries';
+import { OUTLET_MISMATCH_DEBOUNCE_SAMPLES, STALE_AFTER_MS } from '@/lib/queries';
 import type { Device, LogLevel, LogRow, LogTag, ProfileConfig, OutletAlertRow } from '@/lib/types';
 import { celsiusDeltaToFahrenheit, celsiusToFahrenheit, tempRangeC } from '@/lib/units';
 import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
@@ -421,6 +421,7 @@ export default function DeviceTimeline({
   retentionWarning,
   outletAlerts,
   outletAlertHistory,
+  isDeviceOffline,
 }: {
   data: DeviceTimelineData;
   range: { from: string; to: string };
@@ -428,6 +429,7 @@ export default function DeviceTimeline({
   retentionWarning: string | null;
   outletAlerts: OutletAlertRow[];
   outletAlertHistory: OutletAlertHistoryEntry[];
+  isDeviceOffline: boolean;
 }) {
   const fromMs = new Date(range.from).getTime();
   const toMs = new Date(range.to).getTime();
@@ -511,40 +513,83 @@ export default function DeviceTimeline({
   // series) so only the gap itself is red, not the real data either side.
   const offlineGaps = useMemo(() => findTelemetryGaps(data.telemetry), [data.telemetry]);
 
+  // Whether the device was offline at the scrubbed instant specifically —
+  // not just "is it offline right now" — so scrubbing back to before an
+  // outage still shows the real gauges/outlet state from that time, and
+  // only scrubbing *into* a gap (or to the live edge of an ongoing one)
+  // hides them. Mirrors the same gap pairs the chart already draws its red
+  // dashed overlay across, plus an open-ended interval from the last sample
+  // to `toMs` when that trailing gap is itself stale (health.ts's
+  // "ongoing" offline event uses the same last-sample-vs-range-end check).
+  const offlineIntervals = useMemo(() => {
+    const intervals = offlineGaps.map((gap) => ({
+      start: new Date(gap.prev.created_at).getTime(),
+      end: new Date(gap.curr.created_at).getTime(),
+    }));
+    const last = data.telemetry[data.telemetry.length - 1];
+    if (last) {
+      const lastMs = new Date(last.created_at).getTime();
+      if (toMs - lastMs > STALE_AFTER_MS) {
+        intervals.push({ start: lastMs, end: Infinity });
+      }
+    }
+    return intervals;
+  }, [offlineGaps, data.telemetry, toMs]);
+
+  // No telemetry at all in the selected range means the gap logic above has
+  // nothing to anchor to — fall back to the device's actual current
+  // connectivity (from devices.last_seen) rather than assuming either way.
+  const isOfflineAtScrub =
+    data.telemetry.length === 0
+      ? isDeviceOffline
+      : offlineIntervals.some((interval) => scrubMs > interval.start && scrubMs < interval.end);
+
   const chartData = useMemo(() => {
-    const points = data.telemetry.map((row) => ({
+    type ChartPoint = { t: number; tempF: number | null; hum: number | null } & Record<string, number | null>;
+    const points: ChartPoint[] = data.telemetry.map((row) => ({
       t: new Date(row.created_at).getTime(),
-      tempF: celsiusToFahrenheit(row.temp_c) as number | null,
-      hum: row.hum as number | null,
+      tempF: celsiusToFahrenheit(row.temp_c),
+      hum: row.hum,
     }));
     // Real data has no marker for "nothing was reported here" — a null
     // point at the midpoint of each gap makes Recharts actually break the
     // main line there (connectNulls={false} below) instead of silently
     // connecting straight across it in the normal color, which would
     // otherwise render on top of / indistinguishable from the red overlay.
-    const gapBreaks = offlineGaps.map((gap) => ({
+    const gapBreaks: ChartPoint[] = offlineGaps.map((gap) => ({
       t: (new Date(gap.prev.created_at).getTime() + new Date(gap.curr.created_at).getTime()) / 2,
       tempF: null,
       hum: null,
     }));
-    return [...points, ...gapBreaks].sort((a, b) => a.t - b.t);
+    const merged = [...points, ...gapBreaks].sort((a, b) => a.t - b.t);
+
+    // Each gap-overlay Line below reads its boundary values off this same
+    // shared array (via a dedicated per-gap key) rather than being handed
+    // its own separate two-point `data` array. Recharts v3's hover/tooltip
+    // index tracking gets permanently stuck at whatever point it first
+    // lands on for the rest of the chart once ANY Line's `data` prop is a
+    // different array than the others sharing an axis — reproduced against
+    // recharts 3.9.2 in isolation; folding these into `chartData` (each
+    // key real at only its own two boundary points, so `connectNulls`
+    // bridges just that one gap and no others) keeps every Line pointed at
+    // the identical array and avoids the freeze entirely.
+    offlineGaps.forEach((gap, i) => {
+      const prevMs = new Date(gap.prev.created_at).getTime();
+      const currMs = new Date(gap.curr.created_at).getTime();
+      const prevPoint = merged.find((p) => p.t === prevMs);
+      const currPoint = merged.find((p) => p.t === currMs);
+      if (prevPoint) {
+        prevPoint[`gapTempF${i}`] = celsiusToFahrenheit(gap.prev.temp_c);
+        prevPoint[`gapHum${i}`] = gap.prev.hum;
+      }
+      if (currPoint) {
+        currPoint[`gapTempF${i}`] = celsiusToFahrenheit(gap.curr.temp_c);
+        currPoint[`gapHum${i}`] = gap.curr.hum;
+      }
+    });
+
+    return merged;
   }, [data.telemetry, offlineGaps]);
-  const tempGapSegments = useMemo(
-    () =>
-      offlineGaps.map((gap) => [
-        { t: new Date(gap.prev.created_at).getTime(), gapTempF: celsiusToFahrenheit(gap.prev.temp_c) },
-        { t: new Date(gap.curr.created_at).getTime(), gapTempF: celsiusToFahrenheit(gap.curr.temp_c) },
-      ]),
-    [offlineGaps],
-  );
-  const humGapSegments = useMemo(
-    () =>
-      offlineGaps.map((gap) => [
-        { t: new Date(gap.prev.created_at).getTime(), gapHum: gap.prev.hum },
-        { t: new Date(gap.curr.created_at).getTime(), gapHum: gap.curr.hum },
-      ]),
-    [offlineGaps],
-  );
 
   // Config rarely changes mid-window, but when it does the target band
   // should reflect whichever config was active at each point (§5 step 3),
@@ -728,32 +773,32 @@ export default function DeviceTimeline({
                   isAnimationActive={false}
                   connectNulls={false}
                 />
-                {tempGapSegments.map((segment, i) => (
+                {offlineGaps.map((_, i) => (
                   <Line
                     key={`temp-gap-${i}`}
                     yAxisId="temp"
-                    data={segment}
-                    dataKey="gapTempF"
+                    dataKey={`gapTempF${i}`}
                     stroke={CHART_COLORS.offlineGap}
                     strokeWidth={3}
                     strokeDasharray="4 3"
                     dot={false}
                     legendType="none"
                     isAnimationActive={false}
+                    connectNulls
                   />
                 ))}
-                {humGapSegments.map((segment, i) => (
+                {offlineGaps.map((_, i) => (
                   <Line
                     key={`hum-gap-${i}`}
                     yAxisId="hum"
-                    data={segment}
-                    dataKey="gapHum"
+                    dataKey={`gapHum${i}`}
                     stroke={CHART_COLORS.offlineGap}
                     strokeWidth={3}
                     strokeDasharray="4 3"
                     dot={false}
                     legendType="none"
                     isAnimationActive={false}
+                    connectNulls
                   />
                 ))}
                 <ReferenceLine yAxisId="temp" x={scrubMs} stroke={CHART_COLORS.scrubLine} strokeDasharray="4 4" />
@@ -805,7 +850,11 @@ export default function DeviceTimeline({
         </div>
       </section>
 
-      <ContextPanel state={state} />
+      {isOfflineAtScrub ? (
+        <OfflineNotice lastSeen={data.device.last_seen} />
+      ) : (
+        <ContextPanel state={state} />
+      )}
       <EventLog data={data} entries={timelineEntries} />
       <AlertHistorySection entries={outletAlertHistory} />
     </div>
@@ -909,6 +958,24 @@ function AttentionAlertItem({ item, deviceId }: { item: OutletAlertRow; deviceId
         )}
       </div>
     </div>
+  );
+}
+
+// Gauges and the active-outlet grid reflect the device's *current* state —
+// once it's stopped reporting (STALE_AFTER_MS, same threshold as the fleet
+// table's "stale" status) that state is unknown, not just old, so showing a
+// last-known reading/outlet layout would misrepresent it as live.
+function OfflineNotice({ lastSeen }: { lastSeen: string }) {
+  return (
+    <section className="rounded-2xl bg-device-screen p-6 shadow-device">
+      <div className="flex items-center gap-3 rounded-xl bg-device-surface px-4 py-4 text-device-text-secondary">
+        <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full bg-device-alert" />
+        <p className="text-sm">
+          Device offline — last reported {displayTime(lastSeen, null)}. Current temperature, humidity, and outlet
+          state can&apos;t be shown while disconnected.
+        </p>
+      </div>
+    </section>
   );
 }
 

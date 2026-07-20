@@ -4,7 +4,7 @@ import AutoRefresh from '@/components/AutoRefresh';
 import { requireUser } from '@/lib/supabase/auth';
 import { createClient, isSupabaseConfigured } from '@/lib/supabase/server';
 import { getDeviceTimelineData } from '@/lib/timeline';
-import { getOutletAttention } from '@/lib/queries';
+import { getOutletAttention, STALE_AFTER_MS } from '@/lib/queries';
 import { getActiveOutletAlerts, getOutletAlertHistory, syncOutletAlerts, type OutletAlertHistoryEntry } from '@/lib/alerts';
 import type { OutletAlertRow } from '@/lib/types';
 import DeviceTimeline from '@/components/DeviceTimeline';
@@ -82,6 +82,8 @@ export default async function DeviceTimelinePage({
       ? 'Part of this range predates the 30-day telemetry retention window — temperature/humidity data before then is already purged.'
       : null;
 
+  const isDeviceOffline = now - new Date(data.device.last_seen).getTime() > STALE_AFTER_MS;
+
   return (
     <main className="min-h-screen bg-device-screen p-6 text-device-text">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
@@ -103,6 +105,7 @@ export default async function DeviceTimelinePage({
           retentionWarning={retentionWarning}
           outletAlerts={outletAlerts}
           outletAlertHistory={outletAlertHistory}
+          isDeviceOffline={isDeviceOffline}
         />
       </div>
     </main>
