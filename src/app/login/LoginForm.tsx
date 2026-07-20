@@ -24,6 +24,13 @@ export default function LoginForm() {
       email,
       options: {
         emailRedirectTo: `${window.location.origin}/auth/callback?redirectTo=${encodeURIComponent(redirectTo)}`,
+        // Every authenticated user can read the whole fleet database (no
+        // per-tenant isolation — docs/monitoring-webapp-plan.md §6), so
+        // sign-in must be invite-only: this stops signInWithOtp from
+        // silently creating an account for any email that asks. New people
+        // only get in via an existing user's /invite (src/app/invite),
+        // which pre-creates their auth.users row through the admin API.
+        shouldCreateUser: false,
       },
     });
 

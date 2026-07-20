@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import Link from "next/link";
 import AutoRefresh from "@/components/AutoRefresh";
 import FleetOverview from "@/components/FleetOverview";
 import SignOutButton from "@/components/SignOutButton";
@@ -27,6 +28,14 @@ export default async function HomePage() {
               <div className="rounded-full border border-device-good/30 bg-device-good/10 px-4 py-2 text-sm text-device-good">
                 Read-only monitoring workspace
               </div>
+              {isSupabaseConfigured && (
+                <Link
+                  href="/invite"
+                  className="rounded-full bg-device-surface px-4 py-2 text-sm text-device-text-secondary transition hover:bg-device-surface-hover"
+                >
+                  Invite
+                </Link>
+              )}
               {isSupabaseConfigured && <SignOutButton />}
             </div>
           </div>
