@@ -20,11 +20,29 @@ export const CRITICAL_ERROR_COUNT = 5;
 // samples before treating it as the bug rather than that ordinary lag.
 export const OUTLET_MISMATCH_DEBOUNCE_SAMPLES = 2;
 
+// Confirmed against a real hs-2ac964 case (2026-07-20): the OFF command was
+// logged at 23:00:28, but the Kasa plug's own network round-trip meant
+// telemetry didn't confirm the physical flip until 23:00:58 — 2 samples
+// taken *before* that (both still showing the old state) landed inside that
+// window and got flagged, even though the outlet caught up on its own one
+// sample later and stayed correct. That's the opposite timing of the "flip
+// happens, log lags behind it" case OUTLET_MISMATCH_DEBOUNCE_SAMPLES exists
+// for — here the log lands first and the physical actuation lags behind
+// *it*. Don't flag a disagreement until at least this long has passed since
+// the last logged transition itself, regardless of how many telemetry
+// samples have disagreed since.
+export const OUTLET_ACTUATION_GRACE_MS = 90 * 1000;
+
 export type OutletMismatch = {
   outletIndex: number;
   role: string;
   loggedState: boolean; // outlet_state of the last tag='event' row for this outlet
   actualState: boolean; // current telemetry.outlet_mask bit for this outlet
+};
+
+export type LastLoggedOutletState = {
+  outletState: boolean;
+  loggedAt: string; // created_at of that tag='event' row — see OUTLET_ACTUATION_GRACE_MS
 };
 
 export interface DeviceHealth {
@@ -55,21 +73,26 @@ export const NEW_DEVICE_GRACE_MS = 15 * 60 * 1000;
 export function computeOutletMismatches(
   device: Device,
   recentTelemetry: TelemetryRow[], // newest-first, at least OUTLET_MISMATCH_DEBOUNCE_SAMPLES to flag anything
-  lastLoggedStateByOutlet: Map<number, boolean>,
+  lastLoggedByOutlet: Map<number, LastLoggedOutletState>,
 ): OutletMismatch[] {
   if (recentTelemetry.length < OUTLET_MISMATCH_DEBOUNCE_SAMPLES) return [];
 
   const debounceWindow = recentTelemetry.slice(0, OUTLET_MISMATCH_DEBOUNCE_SAMPLES);
+  const latestSampleMs = new Date(debounceWindow[0].created_at).getTime();
 
-  const sinceFirstSeenMs = new Date(debounceWindow[0].created_at).getTime() - new Date(device.first_seen).getTime();
+  const sinceFirstSeenMs = latestSampleMs - new Date(device.first_seen).getTime();
   if (sinceFirstSeenMs < NEW_DEVICE_GRACE_MS) return [];
 
   const mismatches: OutletMismatch[] = [];
 
   device.outlet_roles.forEach((role, index) => {
-    const loggedState = lastLoggedStateByOutlet.get(index);
-    if (loggedState === undefined) return; // no event ever logged for this outlet — different problem
+    const logged = lastLoggedByOutlet.get(index);
+    if (logged === undefined) return; // no event ever logged for this outlet — different problem
 
+    const sinceLoggedMs = latestSampleMs - new Date(logged.loggedAt).getTime();
+    if (sinceLoggedMs < OUTLET_ACTUATION_GRACE_MS) return; // still within normal command round-trip time
+
+    const { outletState: loggedState } = logged;
     const actualState = Boolean(debounceWindow[0].outlet_mask & (1 << index));
     const allSamplesMismatch = debounceWindow.every(
       (row) => Boolean(row.outlet_mask & (1 << index)) === actualState && actualState !== loggedState,
@@ -141,12 +164,12 @@ export async function getOutletAttention(
     }
   }
 
-  const lastLoggedStateByOutlet = new Map<number, boolean>();
+  const lastLoggedByOutlet = new Map<number, LastLoggedOutletState>();
   lastEventByOutlet.forEach((row, index) => {
-    lastLoggedStateByOutlet.set(index, row.outlet_state as boolean);
+    lastLoggedByOutlet.set(index, { outletState: row.outlet_state as boolean, loggedAt: row.created_at });
   });
 
-  const mismatches = computeOutletMismatches(device, telemetry, lastLoggedStateByOutlet);
+  const mismatches = computeOutletMismatches(device, telemetry, lastLoggedByOutlet);
 
   return mismatches.map((mismatch) => {
     const event = lastEventByOutlet.get(mismatch.outletIndex)!;
@@ -269,10 +292,12 @@ export async function getFleetHealth(supabase: SupabaseClient<Database>): Promis
   for (const device of devices) {
     const recentTelemetry = recentTelemetryByDevice.get(device.device_id) ?? [];
     const lastEventByOutlet = lastEventByDeviceOutlet.get(device.device_id);
-    const lastLoggedStateByOutlet = new Map<number, boolean>();
-    lastEventByOutlet?.forEach((event, index) => lastLoggedStateByOutlet.set(index, event.outlet_state));
+    const lastLoggedByOutlet = new Map<number, LastLoggedOutletState>();
+    lastEventByOutlet?.forEach((event, index) =>
+      lastLoggedByOutlet.set(index, { outletState: event.outlet_state, loggedAt: event.created_at }),
+    );
 
-    const mismatches = computeOutletMismatches(device, recentTelemetry, lastLoggedStateByOutlet);
+    const mismatches = computeOutletMismatches(device, recentTelemetry, lastLoggedByOutlet);
     if (mismatches.length === 0) continue;
 
     // Oldest sample in the (shallow, 2-sample) debounce window — a coarser

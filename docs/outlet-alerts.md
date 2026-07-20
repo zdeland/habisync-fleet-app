@@ -19,6 +19,19 @@ Since alerts never auto-close (below), one flagged during that window
 would otherwise sit open forever, long past the point the device is fully
 configured and reporting correctly.
 
+It's also suppressed for `OUTLET_ACTUATION_GRACE_MS` (90s) after the last
+logged transition itself, regardless of how many telemetry samples have
+disagreed since. Confirmed against a real case (`hs-2ac964`, 2026-07-20,
+Day Light): firmware logged an OFF command at 23:00:28, but the Kasa plug's
+own network round-trip meant telemetry didn't confirm the physical flip
+until 23:00:58 — the 2 samples taken in between (both still showing the
+old state) were enough to satisfy `OUTLET_MISMATCH_DEBOUNCE_SAMPLES` and
+get flagged, even though the outlet caught up on its own one sample later
+and stayed correct. That's the reverse of the timing
+`OUTLET_MISMATCH_DEBOUNCE_SAMPLES` exists for (flip happens, log lags
+behind it) — here the log lands first and the physical actuation lags
+behind *it*.
+
 That detection alone is just a live computation — nothing persists it, so
 there was no way to acknowledge one, mark it as being worked on, or tell it
 apart from a brand new occurrence. `outlet_alerts`
