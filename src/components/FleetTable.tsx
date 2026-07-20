@@ -16,13 +16,17 @@ const STATUS_META = {
   critical: { dot: 'bg-device-alert', label: 'CRITICAL' },
 } as const;
 
-// Deliberately independent of outlet alerts (see the Attention column below)
-// — an open outlet alert can itself be stale/no-longer-current (it's a
-// human-managed workflow item, not a live health signal), so it's never
-// folded into this HEALTHY/WARNING/CRITICAL rollup.
-function deriveStatus({ isStale, recentErrorCount }: DeviceHealth): keyof typeof STATUS_META {
-  if (isStale || recentErrorCount >= CRITICAL_ERROR_COUNT) return 'critical';
-  if (recentErrorCount >= WARNING_ERROR_COUNT) return 'warning';
+// An outlet alert means an outlet's actual state (telemetry.outlet_mask)
+// disagrees with what was last logged — the outlet isn't reliably under
+// firmware control right now, so the device can't be called healthy while
+// that's true. Escalated (a human already confirmed it needs a real fix)
+// counts as critical; merely open (detected, not yet triaged) counts as
+// warning, matching the WARNING tier's own "NEEDS ATTENTION" label. See
+// docs/outlet-alerts.md.
+function deriveStatus({ isStale, recentErrorCount, activeOutletAlerts }: DeviceHealth): keyof typeof STATUS_META {
+  const hasEscalatedOutletAlert = activeOutletAlerts.some((alert) => alert.status === 'escalated');
+  if (isStale || recentErrorCount >= CRITICAL_ERROR_COUNT || hasEscalatedOutletAlert) return 'critical';
+  if (recentErrorCount >= WARNING_ERROR_COUNT || activeOutletAlerts.length > 0) return 'warning';
   return 'healthy';
 }
 

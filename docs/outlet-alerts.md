@@ -41,18 +41,21 @@ only the two explicit actions change status. This was a deliberate choice
 to match exactly what was asked for (two buttons) rather than invent an
 auto-resolve heuristic on top.
 
-## Why it's a separate item from the fleet table's health status
+## How it feeds the fleet table's health status
 
 The fleet table's HEALTHY/WARNING/CRITICAL status
-(`src/components/FleetTable.tsx`'s `deriveStatus`) reflects live signals
-recomputed on every load: staleness and recent error count. An outlet
-alert is different in kind — it's a human-managed workflow item that stays
-open/escalated until someone actively closes it, so it can easily be
-"old" or no longer reflect current reality (the device may have since
-gotten a firmware update, or the specific outlet may have flipped back).
-Folding it into the same badge would make that badge lie about current
-health. Instead it's its own **Attention** column, sourced from
-`DeviceHealth.activeOutletAlerts` (non-closed rows only).
+(`src/components/FleetTable.tsx`'s `deriveStatus`) also factors in
+`DeviceHealth.activeOutletAlerts`: a device with an escalated alert can
+never show HEALTHY (it's treated as CRITICAL), and a merely-open alert
+floors it at WARNING. An outlet alert is still a human-managed workflow
+item — it stays open/escalated until someone actively closes it, so it can
+in principle be "old" (the device may have since gotten a firmware update,
+or the specific outlet may have flipped back) — but until it's closed, the
+webapp treats "an outlet isn't reliably under firmware control" as
+disqualifying for a HEALTHY badge. It's still broken out separately in its
+own **Attention** column too, sourced from the same
+`DeviceHealth.activeOutletAlerts` (non-closed rows only), so you can see
+open vs. escalated counts at a glance rather than just the rolled-up tier.
 
 ## Where the writes happen
 
