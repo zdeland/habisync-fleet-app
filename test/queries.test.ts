@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   computeOutletMismatches,
+  msSinceDeviceBoot,
   NEW_DEVICE_GRACE_MS,
   OUTLET_ACTUATION_GRACE_MS,
   OUTLET_MISMATCH_DEBOUNCE_SAMPLES,
+  REBOOT_GRACE_MS,
   type LastLoggedOutletState,
 } from '../src/lib/queries';
 import type { Device, TelemetryRow } from '../src/lib/types';
@@ -75,9 +77,10 @@ test('flags a real, well-established mismatch outside both grace periods', () =>
   const times = [minutesAfterFirstSeen(120), minutesAfterFirstSeen(119)];
   const telemetry = telemetryAt(times, 0b001);
 
-  const mismatches = computeOutletMismatches(device, telemetry, logged(false, 100 * 60));
+  const { mismatches, checkedOutletIndexes } = computeOutletMismatches(device, telemetry, logged(false, 100 * 60));
 
   assert.deepEqual(mismatches, [{ outletIndex: 0, role: 'Heater', loggedState: false, actualState: true }]);
+  assert.deepEqual(checkedOutletIndexes, [0]);
 });
 
 test('suppresses a mismatch within NEW_DEVICE_GRACE_MS of first_seen', () => {
@@ -87,7 +90,8 @@ test('suppresses a mismatch within NEW_DEVICE_GRACE_MS of first_seen', () => {
   const telemetry = telemetryAt(times, 0b001);
 
   // boot default, outlet not wired yet — loggedAt irrelevant, short-circuits earlier
-  assert.deepEqual(computeOutletMismatches(device, telemetry, logged(false, 0)), []);
+  const result = computeOutletMismatches(device, telemetry, logged(false, 0));
+  assert.deepEqual(result, { mismatches: [], checkedOutletIndexes: [] });
 });
 
 test('resumes flagging right after the new-device grace period elapses', () => {
@@ -96,7 +100,7 @@ test('resumes flagging right after the new-device grace period elapses', () => {
   const times = [minutesAfterFirstSeen(graceMinutes + 10), minutesAfterFirstSeen(graceMinutes + 9)];
   const telemetry = telemetryAt(times, 0b001);
 
-  const mismatches = computeOutletMismatches(device, telemetry, logged(false, 0));
+  const { mismatches } = computeOutletMismatches(device, telemetry, logged(false, 0));
 
   assert.deepEqual(mismatches, [{ outletIndex: 0, role: 'Heater', loggedState: false, actualState: true }]);
 });
@@ -112,7 +116,8 @@ test('suppresses a mismatch within OUTLET_ACTUATION_GRACE_MS of the logged trans
   const telemetry = telemetryAt(times, 0b001);
   const loggedAtSeconds = latestSampleSeconds - OUTLET_ACTUATION_GRACE_MS / 1000 + 30; // 30s inside the grace window
 
-  assert.deepEqual(computeOutletMismatches(device, telemetry, logged(false, loggedAtSeconds)), []);
+  const result = computeOutletMismatches(device, telemetry, logged(false, loggedAtSeconds));
+  assert.deepEqual(result, { mismatches: [], checkedOutletIndexes: [] });
 });
 
 test('resumes flagging once OUTLET_ACTUATION_GRACE_MS has elapsed since the logged transition', () => {
@@ -122,7 +127,7 @@ test('resumes flagging once OUTLET_ACTUATION_GRACE_MS has elapsed since the logg
   const telemetry = telemetryAt(times, 0b001);
   const loggedAtSeconds = latestSampleSeconds - OUTLET_ACTUATION_GRACE_MS / 1000 - 30; // 30s past the grace window
 
-  const mismatches = computeOutletMismatches(device, telemetry, logged(false, loggedAtSeconds));
+  const { mismatches } = computeOutletMismatches(device, telemetry, logged(false, loggedAtSeconds));
 
   assert.deepEqual(mismatches, [{ outletIndex: 0, role: 'Heater', loggedState: false, actualState: true }]);
 });
@@ -132,7 +137,8 @@ test('never flags an outlet with no logged transition at all, grace periods asid
   const times = [minutesAfterFirstSeen(9999), minutesAfterFirstSeen(9998)];
   const telemetry = telemetryAt(times, 0b001);
 
-  assert.deepEqual(computeOutletMismatches(device, telemetry, new Map()), []);
+  const result = computeOutletMismatches(device, telemetry, new Map());
+  assert.deepEqual(result, { mismatches: [], checkedOutletIndexes: [] });
 });
 
 test('requires at least OUTLET_MISMATCH_DEBOUNCE_SAMPLES telemetry rows', () => {
@@ -141,7 +147,56 @@ test('requires at least OUTLET_MISMATCH_DEBOUNCE_SAMPLES telemetry rows', () => 
   assert.equal(times.length < OUTLET_MISMATCH_DEBOUNCE_SAMPLES, true);
   const telemetry = telemetryAt(times, 0b001);
 
-  assert.deepEqual(computeOutletMismatches(device, telemetry, logged(false, 0)), []);
+  const result = computeOutletMismatches(device, telemetry, logged(false, 0));
+  assert.deepEqual(result, { mismatches: [], checkedOutletIndexes: [] });
+});
+
+// docs/firmware-outlet-logging-gaps-fixed.md / the hs-2b93f4 investigation
+// (2026-07-21): a reboot forces a burst of outlet flips (turnOffAllOutlets()
+// + Kasa resync) that can briefly disagree with what's logged, the same way
+// a single command's round-trip lag does — see msSinceDeviceBoot.
+test('suppresses a mismatch within REBOOT_GRACE_MS of a detected reboot', () => {
+  // Long-lived device (first_seen well in the past) that just rebooted:
+  // last_seen/uptime_ms together place the current boot 1 minute before the
+  // latest telemetry sample — well past NEW_DEVICE_GRACE_MS, but inside
+  // REBOOT_GRACE_MS of this fresh boot.
+  const latestSampleIso = minutesAfterFirstSeen(9999);
+  const device = makeDevice({
+    reset_reason: 'interrupt watchdog',
+    last_seen: latestSampleIso,
+    uptime_ms: 60_000, // booted 1 minute before last_seen
+  });
+  const times = [latestSampleIso, new Date(new Date(latestSampleIso).getTime() - 60_000).toISOString()];
+  const telemetry = telemetryAt(times, 0b001);
+
+  const result = computeOutletMismatches(device, telemetry, logged(false, 9999 * 60));
+  assert.deepEqual(result, { mismatches: [], checkedOutletIndexes: [] });
+});
+
+test('resumes flagging once REBOOT_GRACE_MS has elapsed since the detected reboot', () => {
+  const latestSampleIso = minutesAfterFirstSeen(9999);
+  const device = makeDevice({
+    reset_reason: 'interrupt watchdog',
+    last_seen: latestSampleIso,
+    uptime_ms: REBOOT_GRACE_MS + 60_000, // booted well outside the grace window
+  });
+  const times = [latestSampleIso, new Date(new Date(latestSampleIso).getTime() - 60_000).toISOString()];
+  const telemetry = telemetryAt(times, 0b001);
+
+  // Logged well before latestSample too, so OUTLET_ACTUATION_GRACE_MS isn't
+  // what's suppressing this — only REBOOT_GRACE_MS is under test here.
+  const loggedAtSeconds = 9999 * 60 - 200;
+  const { mismatches, checkedOutletIndexes } = computeOutletMismatches(device, telemetry, logged(false, loggedAtSeconds));
+
+  assert.deepEqual(mismatches, [{ outletIndex: 0, role: 'Heater', loggedState: false, actualState: true }]);
+  assert.deepEqual(checkedOutletIndexes, [0]);
+});
+
+test('msSinceDeviceBoot derives boot time from last_seen minus uptime_ms', () => {
+  const device = makeDevice({ last_seen: '2026-07-21T15:31:18.000Z', uptime_ms: 61_641 });
+  // Same instant as last_seen — device has been up for uptime_ms by then.
+  const atMs = new Date('2026-07-21T15:31:18.000Z').getTime();
+  assert.equal(msSinceDeviceBoot(device, atMs), 61_641);
 });
 
 // Recreation of the actual hs-2ac964 investigation (2026-07-20), using the
@@ -153,6 +208,8 @@ test('recreates the hs-2ac964 Day Light false positive and no longer flags it', 
     device_id: 'hs-2ac964',
     outlet_roles: ['Heater', 'Mister', 'Fan', 'Day Light', 'UVB Light', 'Plug 6'],
     first_seen: '2026-07-18T20:23:02.284251Z',
+    last_seen: '2026-07-20T22:59:58.843818Z',
+    uptime_ms: 999 * 60 * 60 * 1000, // long-running — nowhere near a reboot
   });
 
   // The 2 most recent telemetry samples as of 23:00:31 (when fleet health
@@ -170,7 +227,8 @@ test('recreates the hs-2ac964 Day Light false positive and no longer flags it', 
     [3, { outletState: false, loggedAt: '2026-07-20T23:00:28.873469Z' }],
   ]);
 
-  assert.deepEqual(computeOutletMismatches(hs2ac964, telemetryAtDetectionTime, lastLoggedByOutlet), []);
+  const result = computeOutletMismatches(hs2ac964, telemetryAtDetectionTime, lastLoggedByOutlet);
+  assert.deepEqual(result.mismatches, []);
 });
 
 // Companion check: the same device/outlet genuinely stuck (mask never
@@ -181,6 +239,8 @@ test('still flags Day Light on hs-2ac964 if the mismatch had actually persisted'
     device_id: 'hs-2ac964',
     outlet_roles: ['Heater', 'Mister', 'Fan', 'Day Light', 'UVB Light', 'Plug 6'],
     first_seen: '2026-07-18T20:23:02.284251Z',
+    last_seen: '2026-07-20T23:15:00.000000Z',
+    uptime_ms: 999 * 60 * 60 * 1000,
   });
 
   // Same mask=12 (Day Light still on) but sampled well after the logged
@@ -194,7 +254,7 @@ test('still flags Day Light on hs-2ac964 if the mismatch had actually persisted'
     [3, { outletState: false, loggedAt: '2026-07-20T23:00:28.873469Z' }],
   ]);
 
-  const mismatches = computeOutletMismatches(hs2ac964, telemetryMuchLater, lastLoggedByOutlet);
+  const { mismatches } = computeOutletMismatches(hs2ac964, telemetryMuchLater, lastLoggedByOutlet);
 
   assert.deepEqual(mismatches, [{ outletIndex: 3, role: 'Day Light', loggedState: false, actualState: true }]);
 });

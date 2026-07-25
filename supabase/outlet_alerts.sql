@@ -16,7 +16,7 @@ create table public.outlet_alerts (
   device_id text not null references public.devices (device_id),
   outlet_index smallint not null,
 
-  status text not null default 'open' check (status in ('open', 'escalated', 'closed')),
+  status text not null default 'open' check (status in ('open', 'escalated', 'auto_resolved', 'closed')),
 
   -- Snapshot of the detected mismatch, taken when this alert (or its most
   -- recent re-open after a prior episode was closed) was created — kept
@@ -36,16 +36,23 @@ create table public.outlet_alerts (
   closed_by uuid references auth.users (id),
   escalated_at timestamptz,
   escalated_by uuid references auth.users (id),
+  -- Set when syncOutletAlerts (not a human) moves this out of open/escalated
+  -- because the live mismatch it tracked stopped reproducing on its own —
+  -- see docs/outlet-alerts.md. No "by" column: nothing to attribute it to.
+  auto_resolved_at timestamptz,
   note text
 );
 
--- At most one *active* (non-closed) alert per outlet at a time — the app
--- upserts against this to stay idempotent across repeated detections
+-- At most one *active* (open/escalated) alert per outlet at a time — the
+-- app upserts against this to stay idempotent across repeated detections
 -- (every fleet/device page load, every 20s auto-refresh) instead of
 -- creating a duplicate row each time the same ongoing mismatch is seen.
+-- auto_resolved is excluded the same as closed: both mean "not currently
+-- an open episode," so a fresh mismatch on that outlet opens a new row
+-- rather than conflicting with a resolved/closed one.
 create unique index outlet_alerts_active_unique
   on public.outlet_alerts (device_id, outlet_index)
-  where status <> 'closed';
+  where status not in ('closed', 'auto_resolved');
 
 -- RLS policies alone are NOT enough — they only restrict rows on top of a
 -- base table-level GRANT that must exist first. This project's schema does

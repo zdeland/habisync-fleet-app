@@ -39,30 +39,37 @@ function newAlertRow(deviceId: string, snapshot: AlertSnapshot): Partial<OutletA
 // close/escalate-able alert as soon as it's detected, without a human
 // having to open the device page first.
 //
-// Deliberately never touches `status` on an existing open/escalated row —
-// that only ever changes via closeOutletAlert/escalateOutletAlert (a human
-// decision). A mismatch that stops being detected is left as-is rather than
-// auto-closed: only the two explicit actions close an alert, matching what
-// was asked for rather than guessing at an auto-resolve heuristic.
+// Never touches `status` on an existing open/escalated row for a *human*
+// decision — that only ever changes via closeOutletAlert/escalateOutletAlert.
+// It does, however, auto-resolve one when `checkedOutletIndexes` (every
+// outlet actually evaluated this pass — see computeOutletMismatches) proves
+// its outlet is no longer mismatching: e.g. a reconnect-flicker alert from a
+// device reboot that settled back to matching within a poll or two. That's
+// `status: 'auto_resolved'`, kept distinct from a human 'closed' — see
+// docs/outlet-alerts.md for why the two behave differently on recurrence.
+// An outlet not present in `checkedOutletIndexes` at all (grace period, not
+// enough samples) is left untouched either way — silence isn't evidence.
 //
 // Closing an alert dismisses that specific episode. If the *same* mismatch
 // (same mismatch_since) is detected again later, it stays closed — closing
 // is a real dismissal, not a snooze. A genuinely new episode (a different
 // mismatch_since — the old one resolved and a new one started) opens a
-// fresh alert even if the last one for this outlet was closed.
+// fresh alert even if the last one for this outlet was closed. An
+// auto-resolved alert has no such stickiness: the system, not a person,
+// made that call, so a recurrence just reopens it as fresh evidence.
 export async function syncOutletAlerts(
   supabase: SupabaseClient<Database>,
   deviceId: string,
   snapshots: AlertSnapshot[],
+  checkedOutletIndexes: number[],
 ): Promise<void> {
-  if (snapshots.length === 0) return;
+  if (checkedOutletIndexes.length === 0) return;
 
-  const outletIndexes = snapshots.map((s) => s.outletIndex);
   const { data: existingRows, error } = await supabase
     .from('outlet_alerts')
     .select('*')
     .eq('device_id', deviceId)
-    .in('outlet_index', outletIndexes)
+    .in('outlet_index', checkedOutletIndexes)
     .order('id', { ascending: false });
 
   if (error) throw error;
@@ -74,8 +81,10 @@ export async function syncOutletAlerts(
     }
   }
 
+  const mismatchingIndexes = new Set(snapshots.map((s) => s.outletIndex));
   const toInsert: Partial<OutletAlertRow>[] = [];
   const toUpdate: { id: number; changes: Partial<OutletAlertRow> }[] = [];
+  const now = new Date().toISOString();
 
   for (const snapshot of snapshots) {
     const existing = latestByOutlet.get(snapshot.outletIndex);
@@ -99,6 +108,14 @@ export async function syncOutletAlerts(
       if (!sameEpisode) {
         toInsert.push(newAlertRow(deviceId, snapshot));
       }
+      continue;
+    }
+
+    if (existing.status === 'auto_resolved') {
+      // Not sticky like a human close — proof the mismatch is back means
+      // the auto-resolve call was wrong, so always reopen fresh rather than
+      // checking sameEpisode.
+      toInsert.push(newAlertRow(deviceId, snapshot));
       continue;
     }
 
@@ -127,11 +144,22 @@ export async function syncOutletAlerts(
           last_logged_message: snapshot.lastLoggedMessage,
           last_logged_at: snapshot.lastLoggedAt,
           ...(refinedMismatchSince != null ? { mismatch_since: refinedMismatchSince } : {}),
-          updated_at: new Date().toISOString(),
+          updated_at: now,
         },
       });
     }
   }
+
+  // Auto-resolve: an outlet we actually checked this pass, that has an
+  // open/escalated alert, but is no longer among the mismatching outlets.
+  latestByOutlet.forEach((existing, outletIndex) => {
+    if (mismatchingIndexes.has(outletIndex)) return;
+    if (existing.status !== 'open' && existing.status !== 'escalated') return;
+    toUpdate.push({
+      id: existing.id,
+      changes: { status: 'auto_resolved', auto_resolved_at: now, updated_at: now },
+    });
+  });
 
   await Promise.all([
     // One insert per row (not a single batched insert) so a unique-index
@@ -147,9 +175,11 @@ export async function syncOutletAlerts(
   ]);
 }
 
-// Active (non-closed) alerts for the given devices, grouped by device_id —
-// what the fleet table's separate attention column and the device page's
-// attention card both render.
+// Active (open/escalated) alerts for the given devices, grouped by
+// device_id — what the fleet table's separate attention column and the
+// device page's attention card both render. Excludes both terminal statuses:
+// 'closed' (a human dismissal) and 'auto_resolved' (the system found the
+// mismatch cleared on its own) — neither needs anyone looking at it.
 export async function getActiveOutletAlerts(
   supabase: SupabaseClient<Database>,
   deviceIds: string[],
@@ -161,6 +191,7 @@ export async function getActiveOutletAlerts(
     .select('*')
     .in('device_id', deviceIds)
     .neq('status', 'closed')
+    .neq('status', 'auto_resolved')
     .order('detected_at', { ascending: true });
 
   if (error) throw error;
@@ -177,9 +208,9 @@ export async function getActiveOutletAlerts(
 // Full history (every status, newest first) for one device — what the
 // device page's "Alert history" section renders. Unlike
 // getActiveOutletAlerts (fleet-wide, active-only), this includes closed
-// rows and resolves closed_by/escalated_by to an email via
-// outlet_alert_actors (supabase/outlet_alert_actors.sql) so the list can
-// show who acted, not just a user id.
+// rows and resolves closed_by/escalated_by to an email via profiles
+// (supabase/profiles.sql) so the list can show who acted, not just a user
+// id.
 export async function getOutletAlertHistory(
   supabase: SupabaseClient<Database>,
   deviceId: string,
@@ -200,7 +231,7 @@ export async function getOutletAlertHistory(
   const emailById = new Map<string, string | null>();
   if (actorIds.length > 0) {
     const { data: actors, error: actorsError } = await supabase
-      .from('outlet_alert_actors')
+      .from('profiles')
       .select('*')
       .in('id', actorIds);
     if (actorsError) throw actorsError;

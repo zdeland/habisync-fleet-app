@@ -15,7 +15,7 @@ import {
 } from 'recharts';
 import { reconstructStateAt, resolveConfigAt, type DeviceTimelineData, type ReconstructedState } from '@/lib/timeline';
 import { deriveHealthEvents, findTelemetryGaps, mergeTimelineEntries, type TimelineEntry } from '@/lib/health';
-import { OUTLET_MISMATCH_DEBOUNCE_SAMPLES, STALE_AFTER_MS } from '@/lib/queries';
+import { msSinceDeviceBoot, OUTLET_MISMATCH_DEBOUNCE_SAMPLES, STALE_AFTER_MS } from '@/lib/queries';
 import type { Device, LogLevel, LogRow, LogTag, ProfileConfig, OutletAlertRow } from '@/lib/types';
 import { celsiusDeltaToFahrenheit, celsiusToFahrenheit, tempRangeC } from '@/lib/units';
 import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
@@ -650,7 +650,7 @@ export default function DeviceTimeline({
 
   return (
     <div className="flex flex-col gap-6">
-      <AttentionCard items={outletAlerts} deviceId={data.device.device_id} />
+      <AttentionCard items={outletAlerts} deviceId={data.device.device_id} device={data.device} />
 
       <section className="rounded-2xl bg-device-card p-6 shadow-device">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -868,7 +868,7 @@ export default function DeviceTimeline({
 // long enough to rule out the ordinary lag between a real flip and its
 // event row landing (docs/automation-rules.md §9). Renders nothing when
 // there's nothing active.
-function AttentionCard({ items, deviceId }: { items: OutletAlertRow[]; deviceId: string }) {
+function AttentionCard({ items, deviceId, device }: { items: OutletAlertRow[]; deviceId: string; device: Device }) {
   if (items.length === 0) return null;
 
   return (
@@ -884,15 +884,40 @@ function AttentionCard({ items, deviceId }: { items: OutletAlertRow[]; deviceId:
       </p>
       <div className="flex flex-col gap-3">
         {items.map((item) => (
-          <AttentionAlertItem key={item.id} item={item} deviceId={deviceId} />
+          <AttentionAlertItem key={item.id} item={item} deviceId={deviceId} device={device} />
         ))}
       </div>
     </section>
   );
 }
 
-function AttentionAlertItem({ item, deviceId }: { item: OutletAlertRow; deviceId: string }) {
+// A wider window than REBOOT_GRACE_MS (which only suppresses detection for
+// the first few minutes) — this is just a display hint, so it stays useful
+// a bit longer than that. Best-effort only: device.uptime_ms/last_seen
+// describe the device's *current* boot, so this can't see a reboot that's
+// since been superseded by a later one.
+const REBOOT_CONTEXT_WINDOW_MS = 30 * 60 * 1000;
+
+function nearbyRebootNote(device: Device, referenceIso: string): string | null {
+  const referenceMs = new Date(referenceIso).getTime();
+  const sinceBootMs = msSinceDeviceBoot(device, referenceMs);
+  if (Math.abs(sinceBootMs) >= REBOOT_CONTEXT_WINDOW_MS) return null;
+
+  const bootAtIso = new Date(referenceMs - sinceBootMs).toISOString();
+  return `Device rebooted ${displayTime(bootAtIso, null)} (${device.reset_reason}) — may be reconnect-flicker from that reboot rather than a real problem. Verify before escalating.`;
+}
+
+function AttentionAlertItem({
+  item,
+  deviceId,
+  device,
+}: {
+  item: OutletAlertRow;
+  deviceId: string;
+  device: Device;
+}) {
   const [isPending, setIsPending] = useState(false);
+  const rebootNote = nearbyRebootNote(device, item.mismatch_since);
 
   async function handleClose() {
     setIsPending(true);
@@ -937,6 +962,7 @@ function AttentionAlertItem({ item, deviceId }: { item: OutletAlertRow; deviceId
         <dt className="text-device-text-tertiary">Mismatch since</dt>
         <dd className="text-device-text">at least {displayTime(item.mismatch_since, null)}</dd>
       </dl>
+      {rebootNote && <p className="mt-2 text-[0.75em] text-device-text-secondary">💡 {rebootNote}</p>}
       <div className="mt-3 flex gap-2">
         <button
           type="button"
@@ -1151,6 +1177,7 @@ function EventLog({ data, entries }: { data: DeviceTimelineData; entries: Timeli
 const HISTORY_STATUS_META: Record<OutletAlertRow['status'], { label: string; className: string }> = {
   open: { label: 'OPEN', className: 'bg-device-alert/15 text-device-alert' },
   escalated: { label: 'ESCALATED', className: 'bg-device-heating/15 text-device-heating' },
+  auto_resolved: { label: 'AUTO-RESOLVED', className: GAUGE_COLORS.neutral.badgeClassName },
   closed: { label: 'CLOSED', className: GAUGE_COLORS.neutral.badgeClassName },
 };
 
@@ -1198,6 +1225,12 @@ function AlertHistorySection({ entries }: { entries: OutletAlertHistoryEntry[] }
                     <span>
                       Closed {displayTime(entry.closed_at, null)}
                       {entry.closedByEmail ? ` by ${entry.closedByEmail}` : ''}
+                    </span>
+                  )}
+                  {entry.auto_resolved_at && (
+                    <span>
+                      Auto-resolved {displayTime(entry.auto_resolved_at, null)} — mismatch cleared on its own before
+                      anyone reviewed it
                     </span>
                   )}
                   {entry.status === 'open' && <span>Still open</span>}

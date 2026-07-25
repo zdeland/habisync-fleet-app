@@ -58,7 +58,7 @@ export default async function DeviceTimelinePage({
   let outletAlerts: OutletAlertRow[];
   let outletAlertHistory: OutletAlertHistoryEntry[];
   if (supabase) {
-    const outletAttention = await getOutletAttention(supabase, data.device);
+    const { mismatches: outletAttention, checkedOutletIndexes } = await getOutletAttention(supabase, data.device);
     const snapshots = outletAttention.map((item) => ({
       outletIndex: item.outletIndex,
       role: item.role,
@@ -68,7 +68,7 @@ export default async function DeviceTimelinePage({
       lastLoggedAt: item.lastLoggedAt,
       mismatchSince: item.mismatchSince,
     }));
-    await syncOutletAlerts(supabase, data.device.device_id, snapshots);
+    await syncOutletAlerts(supabase, data.device.device_id, snapshots, checkedOutletIndexes);
     const activeAlertsByDevice = await getActiveOutletAlerts(supabase, [data.device.device_id]);
     outletAlerts = activeAlertsByDevice.get(data.device.device_id) ?? [];
     outletAlertHistory = await getOutletAlertHistory(supabase, data.device.device_id);

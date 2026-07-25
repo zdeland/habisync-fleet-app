@@ -90,7 +90,7 @@ export type TelemetryRow = {
   rssi: number;
 };
 
-export type OutletAlertStatus = 'open' | 'escalated' | 'closed';
+export type OutletAlertStatus = 'open' | 'escalated' | 'auto_resolved' | 'closed';
 
 // Webapp-owned workflow table — NOT part of the device-reported schema above
 // (devices/logs/telemetry are firmware ground truth; this app never writes
@@ -118,13 +118,18 @@ export type OutletAlertRow = {
   closed_by: string | null;
   escalated_at: string | null;
   escalated_by: string | null;
+  // Set when syncOutletAlerts, not a human, transitions this alert out of
+  // open/escalated because the live mismatch it was tracking stopped
+  // reproducing — see src/lib/alerts.ts. Distinct from closed_by (always
+  // null here): no auth.users id to attribute this to.
+  auto_resolved_at: string | null;
   note: string | null;
 };
 
-// Read-only projection of auth.users (id, email) — see
-// supabase/outlet_alert_actors.sql — so the alert history can show who
+// Minimal projection of auth.users (id, email), synced via trigger — see
+// supabase/profiles.sql — so the alert history can show who
 // closed/escalated an alert. Never anything beyond these two columns.
-export type OutletAlertActorRow = {
+export type ProfileRow = {
   id: string;
   email: string | null;
 };
@@ -152,10 +157,9 @@ export type Database = {
         Update: Partial<OutletAlertRow>;
         Relationships: [];
       };
+      profiles: { Row: ProfileRow; Insert: Partial<ProfileRow>; Update: Partial<ProfileRow>; Relationships: [] };
     };
-    Views: {
-      outlet_alert_actors: { Row: OutletAlertActorRow; Relationships: [] };
-    };
+    Views: { [_ in never]: never };
     Functions: { [_ in never]: never };
     Enums: { [_ in never]: never };
     CompositeTypes: { [_ in never]: never };

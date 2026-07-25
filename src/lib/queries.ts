@@ -69,21 +69,56 @@ export interface DeviceHealth {
 // this long after the device's very first-ever telemetry.
 export const NEW_DEVICE_GRACE_MS = 15 * 60 * 1000;
 
+// devices.uptime_ms/last_seen come from the same heartbeat upsert, so their
+// difference is this device's current boot instant — independent of any
+// telemetry history, which is why this works even for a device that just
+// rebooted and hasn't reported a fresh telemetry sample yet.
+export function msSinceDeviceBoot(device: Device, atMs: number): number {
+  const bootAtMs = new Date(device.last_seen).getTime() - device.uptime_ms;
+  return atMs - bootAtMs;
+}
+
+// docs/firmware-outlet-logging-gaps-fixed.md: a reboot or Kasa reconnect
+// forces every outlet to a known state via turnOffAllOutlets(), then the
+// periodic Kasa resync and/or ClimateController can flip several back
+// within seconds. Each flip now logs correctly (the 0.7.1 fix), but there's
+// still a real window between the physical flip and its event row landing
+// during that burst — the same shape of problem OUTLET_MISMATCH_DEBOUNCE_SAMPLES
+// and OUTLET_ACTUATION_GRACE_MS exist for, just triggered by a reboot instead
+// of a single command. Observed directly on hs-2b93f4 (2026-07-21,
+// interrupt-watchdog reset): the whole reconnect-and-resettle sequence
+// finished in well under a minute; this gives it roughly a 3x margin.
+export const REBOOT_GRACE_MS = 3 * 60 * 1000;
+
+export type MismatchCheckResult = {
+  mismatches: OutletMismatch[];
+  // Every outlet index actually evaluated this call — i.e. excluding ones
+  // skipped by a grace period or a missing logged transition. syncOutletAlerts
+  // needs this to know which previously-open alerts it's safe to auto-resolve
+  // (checked and no longer mismatching) versus which it must leave alone
+  // (not evaluated this pass, so silence doesn't mean "resolved").
+  checkedOutletIndexes: number[];
+};
+
 // Exported for testing; see getFleetHealth for how it's fed.
 export function computeOutletMismatches(
   device: Device,
   recentTelemetry: TelemetryRow[], // newest-first, at least OUTLET_MISMATCH_DEBOUNCE_SAMPLES to flag anything
   lastLoggedByOutlet: Map<number, LastLoggedOutletState>,
-): OutletMismatch[] {
-  if (recentTelemetry.length < OUTLET_MISMATCH_DEBOUNCE_SAMPLES) return [];
+): MismatchCheckResult {
+  if (recentTelemetry.length < OUTLET_MISMATCH_DEBOUNCE_SAMPLES) return { mismatches: [], checkedOutletIndexes: [] };
 
   const debounceWindow = recentTelemetry.slice(0, OUTLET_MISMATCH_DEBOUNCE_SAMPLES);
   const latestSampleMs = new Date(debounceWindow[0].created_at).getTime();
 
   const sinceFirstSeenMs = latestSampleMs - new Date(device.first_seen).getTime();
-  if (sinceFirstSeenMs < NEW_DEVICE_GRACE_MS) return [];
+  if (sinceFirstSeenMs < NEW_DEVICE_GRACE_MS) return { mismatches: [], checkedOutletIndexes: [] };
+
+  const sinceBootMs = msSinceDeviceBoot(device, latestSampleMs);
+  if (sinceBootMs >= 0 && sinceBootMs < REBOOT_GRACE_MS) return { mismatches: [], checkedOutletIndexes: [] };
 
   const mismatches: OutletMismatch[] = [];
+  const checkedOutletIndexes: number[] = [];
 
   device.outlet_roles.forEach((role, index) => {
     const logged = lastLoggedByOutlet.get(index);
@@ -91,6 +126,8 @@ export function computeOutletMismatches(
 
     const sinceLoggedMs = latestSampleMs - new Date(logged.loggedAt).getTime();
     if (sinceLoggedMs < OUTLET_ACTUATION_GRACE_MS) return; // still within normal command round-trip time
+
+    checkedOutletIndexes.push(index);
 
     const { outletState: loggedState } = logged;
     const actualState = Boolean(debounceWindow[0].outlet_mask & (1 << index));
@@ -102,7 +139,7 @@ export function computeOutletMismatches(
     }
   });
 
-  return mismatches;
+  return { mismatches, checkedOutletIndexes };
 }
 
 export type OutletAttention = OutletMismatch & {
@@ -129,10 +166,15 @@ const ATTENTION_EVENT_LOOKBACK = 200;
 // page's "needs attention" card, which wants the actual last-logged message/
 // timestamp and how far back the mismatch traces, not just a fleet-table
 // boolean.
+export type OutletAttentionResult = {
+  mismatches: OutletAttention[];
+  checkedOutletIndexes: number[]; // see MismatchCheckResult — feeds syncOutletAlerts's auto-resolve pass
+};
+
 export async function getOutletAttention(
   supabase: SupabaseClient<Database>,
   device: Device,
-): Promise<OutletAttention[]> {
+): Promise<OutletAttentionResult> {
   const [{ data: telemetryRows, error: telemetryError }, { data: eventRows, error: eventsError }] = await Promise.all([
     supabase
       .from('telemetry')
@@ -154,7 +196,7 @@ export async function getOutletAttention(
   if (eventsError) throw eventsError;
 
   const telemetry = telemetryRows ?? []; // newest-first
-  if (telemetry.length === 0) return [];
+  if (telemetry.length === 0) return { mismatches: [], checkedOutletIndexes: [] };
 
   const lastEventByOutlet = new Map<number, LogRow>();
   for (const row of eventRows ?? []) {
@@ -169,31 +211,34 @@ export async function getOutletAttention(
     lastLoggedByOutlet.set(index, { outletState: row.outlet_state as boolean, loggedAt: row.created_at });
   });
 
-  const mismatches = computeOutletMismatches(device, telemetry, lastLoggedByOutlet);
+  const { mismatches, checkedOutletIndexes } = computeOutletMismatches(device, telemetry, lastLoggedByOutlet);
 
-  return mismatches.map((mismatch) => {
-    const event = lastEventByOutlet.get(mismatch.outletIndex)!;
+  return {
+    checkedOutletIndexes,
+    mismatches: mismatches.map((mismatch) => {
+      const event = lastEventByOutlet.get(mismatch.outletIndex)!;
 
-    let mismatchSince = telemetry[0].created_at;
-    let mismatchSinceIsLowerBound = true;
-    for (const row of telemetry) {
-      if (Boolean(row.outlet_mask & (1 << mismatch.outletIndex)) !== mismatch.actualState) {
-        mismatchSinceIsLowerBound = false;
-        break;
+      let mismatchSince = telemetry[0].created_at;
+      let mismatchSinceIsLowerBound = true;
+      for (const row of telemetry) {
+        if (Boolean(row.outlet_mask & (1 << mismatch.outletIndex)) !== mismatch.actualState) {
+          mismatchSinceIsLowerBound = false;
+          break;
+        }
+        mismatchSince = row.created_at;
       }
-      mismatchSince = row.created_at;
-    }
 
-    return {
-      ...mismatch,
-      lastLoggedAt: event.created_at,
-      lastLoggedDeviceTime: event.device_time,
-      lastLoggedMessage: event.message,
-      actualStateAt: telemetry[0].created_at,
-      mismatchSince,
-      mismatchSinceIsLowerBound,
-    };
-  });
+      return {
+        ...mismatch,
+        lastLoggedAt: event.created_at,
+        lastLoggedDeviceTime: event.device_time,
+        lastLoggedMessage: event.message,
+        actualStateAt: telemetry[0].created_at,
+        mismatchSince,
+        mismatchSinceIsLowerBound,
+      };
+    }),
+  };
 }
 
 export async function getFleetHealth(supabase: SupabaseClient<Database>): Promise<DeviceHealth[]> {
@@ -288,7 +333,7 @@ export async function getFleetHealth(supabase: SupabaseClient<Database>): Promis
   // fleet-wide as soon as it's detected, not only once a human opens that
   // device's page (which runs its own, deeper detection via
   // getOutletAttention).
-  const snapshotsByDevice = new Map<string, AlertSnapshot[]>();
+  const syncInputByDevice = new Map<string, { snapshots: AlertSnapshot[]; checkedOutletIndexes: number[] }>();
   for (const device of devices) {
     const recentTelemetry = recentTelemetryByDevice.get(device.device_id) ?? [];
     const lastEventByOutlet = lastEventByDeviceOutlet.get(device.device_id);
@@ -297,8 +342,10 @@ export async function getFleetHealth(supabase: SupabaseClient<Database>): Promis
       lastLoggedByOutlet.set(index, { outletState: event.outlet_state, loggedAt: event.created_at }),
     );
 
-    const mismatches = computeOutletMismatches(device, recentTelemetry, lastLoggedByOutlet);
-    if (mismatches.length === 0) continue;
+    const { mismatches, checkedOutletIndexes } = computeOutletMismatches(device, recentTelemetry, lastLoggedByOutlet);
+    // Nothing evaluated this pass (grace period, not enough samples, etc.) —
+    // leave any existing alerts alone rather than reading silence as "resolved."
+    if (checkedOutletIndexes.length === 0) continue;
 
     // Oldest sample in the (shallow, 2-sample) debounce window — a coarser
     // lower-bound than getOutletAttention's deeper scan, refined later if
@@ -306,9 +353,9 @@ export async function getFleetHealth(supabase: SupabaseClient<Database>): Promis
     const mismatchSince = recentTelemetry[recentTelemetry.length - 1]?.created_at ?? recentTelemetry[0]?.created_at;
     if (!mismatchSince) continue;
 
-    snapshotsByDevice.set(
-      device.device_id,
-      mismatches.map((mismatch) => {
+    syncInputByDevice.set(device.device_id, {
+      checkedOutletIndexes,
+      snapshots: mismatches.map((mismatch) => {
         const event = lastEventByOutlet?.get(mismatch.outletIndex);
         return {
           outletIndex: mismatch.outletIndex,
@@ -320,12 +367,12 @@ export async function getFleetHealth(supabase: SupabaseClient<Database>): Promis
           mismatchSince,
         };
       }),
-    );
+    });
   }
 
   await Promise.all(
-    Array.from(snapshotsByDevice.entries()).map(([deviceId, snapshots]) =>
-      syncOutletAlerts(supabase, deviceId, snapshots),
+    Array.from(syncInputByDevice.entries()).map(([deviceId, { snapshots, checkedOutletIndexes }]) =>
+      syncOutletAlerts(supabase, deviceId, snapshots, checkedOutletIndexes),
     ),
   );
 
