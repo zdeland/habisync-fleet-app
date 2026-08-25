@@ -85,13 +85,13 @@ export default async function DeviceTimelinePage({
   const isDeviceOffline = now - new Date(data.device.last_seen).getTime() > STALE_AFTER_MS;
 
   return (
-    <main className="min-h-screen bg-device-screen p-6 text-device-text">
-      <div className="mx-auto flex max-w-7xl flex-col gap-6">
-        <header className="rounded-2xl bg-device-card p-6 shadow-device">
+    <main className="min-h-screen bg-device-screen p-4 text-device-text sm:p-6">
+      <div className="mx-auto flex max-w-7xl flex-col gap-4 sm:gap-6">
+        <header className="rounded-2xl bg-device-card p-4 shadow-device sm:p-6">
           <Link href="/" className="text-sm text-device-accent hover:underline">
             ← Fleet overview
           </Link>
-          <h1 className="mt-2 text-2xl font-semibold">{data.device.name}</h1>
+          <h1 className="mt-2 text-xl font-semibold sm:text-2xl">{data.device.name}</h1>
           <p className="text-sm text-device-text-tertiary">{data.device.device_id}</p>
         </header>
 

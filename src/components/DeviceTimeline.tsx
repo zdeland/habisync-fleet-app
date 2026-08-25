@@ -183,57 +183,6 @@ function iconForLog(row: LogRow, device: Device, configLogs: LogRow[]) {
   return TAG_ICONS[row.tag] ?? '🔔';
 }
 
-// docs/style-guide.md §6 — hand-drawn semicircle gauge, viewBox 0 0 200 120,
-// center (100,100), radius 80, 16px zone arcs, needle + center dot. Domain
-// is always 0-100 (matches the on-device gauge exactly, including for
-// temperature — zone breakpoints come from the live climate targets).
-function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number) {
-  const a = ((angleDeg - 180) * Math.PI) / 180;
-  return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
-}
-
-function arcPath(cx: number, cy: number, r: number, a0: number, a1: number) {
-  const p0 = polarToCartesian(cx, cy, r, a0);
-  const p1 = polarToCartesian(cx, cy, r, a1);
-  const largeArc = a1 - a0 > 180 ? 1 : 0;
-  return `M ${p0.x} ${p0.y} A ${r} ${r} 0 ${largeArc} 1 ${p1.x} ${p1.y}`;
-}
-
-type GaugeZone = { from: number; to: number; color: string };
-
-function Gauge({ value, min, max, zones }: { value: number | null; min: number; max: number; zones: GaugeZone[] }) {
-  const cx = 100;
-  const cy = 100;
-  const r = 80;
-  const clamped = value == null ? null : Math.max(min, Math.min(max, value));
-  const needle = clamped == null ? null : polarToCartesian(cx, cy, r - 14, ((clamped - min) / (max - min)) * 180);
-
-  return (
-    <svg viewBox="0 0 200 120" className="block w-full">
-      {zones.map((zone, i) => {
-        const from = Math.max(min, Math.min(max, zone.from));
-        const to = Math.max(min, Math.min(max, zone.to));
-        if (to <= from) return null;
-        const a0 = ((from - min) / (max - min)) * 180;
-        const a1 = ((to - min) / (max - min)) * 180;
-        return <path key={i} d={arcPath(cx, cy, r, a0, a1)} stroke={zone.color} strokeWidth={16} fill="none" />;
-      })}
-      {needle && (
-        <>
-          <line x1={cx} y1={cy} x2={needle.x} y2={needle.y} stroke="#eee" strokeWidth={4} strokeLinecap="round" />
-          <circle cx={cx} cy={cy} r={6} fill="#eee" />
-        </>
-      )}
-      <text x={16} y={114} fill="#93A8BD" fontSize={12}>
-        {min}
-      </text>
-      <text x={184} y={114} fill="#93A8BD" fontSize={12} textAnchor="end">
-        {max}
-      </text>
-    </svg>
-  );
-}
-
 // The real automation (docs/automation-rules.md §3-5) has different
 // ON->OFF and OFF->ON thresholds — the "low"/"high" gauge zone lines are
 // where a trigger *starts*, not where it releases. Passing the real
@@ -246,8 +195,26 @@ function isBelowActive(value: number, low: number, hysteresis: number, outletOn:
   return Boolean(outletOn) && value < low + hysteresis;
 }
 
-// One gauge + value readout + in-range badge, for either temp or humidity.
-function GaugeColumn({
+// Card-level accent (border + background tint), separate from the badge's
+// own color — the badge keeps its existing per-metric "why" color (e.g.
+// humidity's dry-orange vs temp's cool-blue "below" state), but the card
+// itself always reads as one consistent blue/green/red regardless of which
+// metric, so "in range vs. not" is scannable across the whole row.
+type CardTone = 'below' | 'above' | 'good' | 'neutral';
+
+const CARD_TONE_CLASSNAMES: Record<CardTone, string> = {
+  below: 'border-device-cool/40 bg-device-cool/10',
+  above: 'border-device-alert/40 bg-device-alert/10',
+  good: 'border-device-good/40 bg-device-good/10',
+  neutral: 'border-transparent bg-device-surface',
+};
+
+// Live value + in-range badge, for either temp or humidity. Was a
+// hand-drawn semicircle gauge (docs/style-guide.md §6); replaced with a
+// plain stat card — reads better at small (mobile) widths and the badge +
+// number alone already carry the same "how far off target" information the
+// needle position used to.
+function ReadingCard({
   label,
   value,
   unit,
@@ -281,48 +248,51 @@ function GaugeColumn({
   automationEnabled: boolean | null;
   controlStatus: { dotClassName: string; label: string };
 }) {
-  const hasTarget = automationEnabled === true && low != null && high != null;
+  const hasRange = low != null && high != null;
 
-  const zones: GaugeZone[] = hasTarget
-    ? [
-        { from: 0, to: low, color: lowColor.hex },
-        { from: low, to: high, color: GAUGE_COLORS.good.hex },
-        { from: high, to: 100, color: GAUGE_COLORS.alert.hex },
-      ]
-    : [{ from: 0, to: 100, color: GAUGE_COLORS.neutral.hex }];
+  // Tone (and the badge below) track the reading against its range whenever
+  // both exist, independent of whether automation itself is enabled — the
+  // thresholds are real even when nothing's currently acting on them, so
+  // "TOO HOT"/"IN RANGE"/etc. is more useful here than a blanket AUTOMATION
+  // DISABLED that would otherwise contradict the card's own color.
+  let tone: CardTone = 'neutral';
+  if (hasRange && value != null) {
+    if (isBelowActive(value, low, hysteresis, belowOutletOn)) tone = 'below';
+    else if (aboveActive) tone = 'above';
+    else tone = 'good';
+  }
 
   let badge: { className: string; label: string };
-  if (!hasTarget) {
-    badge = { className: GAUGE_COLORS.neutral.badgeClassName, label: automationEnabled === false ? 'AUTOMATION DISABLED' : 'NO TARGET' };
-  } else if (value == null) {
-    badge = { className: GAUGE_COLORS.neutral.badgeClassName, label: 'NO DATA' };
-  } else if (isBelowActive(value, low, hysteresis, belowOutletOn)) {
+  if (tone === 'below') {
     badge = { className: lowColor.badgeClassName, label: lowLabel };
-  } else if (aboveActive) {
+  } else if (tone === 'above') {
     badge = { className: GAUGE_COLORS.alert.badgeClassName, label: highLabel };
-  } else {
+  } else if (tone === 'good') {
     badge = { className: GAUGE_COLORS.good.badgeClassName, label: 'IN RANGE' };
+  } else if (!hasRange) {
+    badge = { className: GAUGE_COLORS.neutral.badgeClassName, label: automationEnabled === false ? 'AUTOMATION DISABLED' : 'NO TARGET' };
+  } else {
+    badge = { className: GAUGE_COLORS.neutral.badgeClassName, label: 'NO DATA' };
   }
 
   return (
-    <div className="flex flex-1 flex-col items-center">
-      <div className="relative w-full max-w-[220px]">
-        <Gauge value={value} min={0} max={100} zones={zones} />
-        <div className="absolute inset-x-0 top-[58%] -translate-y-1/2 text-center text-[1.6em] font-bold text-device-text">
-          {value != null ? `${value.toFixed(1)}${unit}` : '—'}
+    <div className={`flex flex-1 flex-col gap-3 rounded-xl border p-5 ${CARD_TONE_CLASSNAMES[tone]}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-[0.9em] text-device-text-secondary">{label}</p>
+        <div className={`rounded-full px-3 py-1 font-mono text-[0.75em] font-semibold ${badge.className}`}>
+          {badge.label}
         </div>
       </div>
-      <p className="mt-1 text-[0.9em] text-device-text-secondary">{label}</p>
-      <div className={`mt-2 rounded-full px-3 py-1 font-mono text-[0.75em] font-semibold ${badge.className}`}>
-        {badge.label}
-      </div>
-      {hasTarget && (
-        <p className="mt-1.5 text-[0.8em] text-device-text-tertiary">
+      <p className="text-[2.4em] font-bold leading-none text-device-text">
+        {value != null ? `${value.toFixed(1)}${unit}` : '—'}
+      </p>
+      {hasRange && (
+        <p className="text-[0.8em] text-device-text-tertiary">
           User Defined Optimal Range: {low.toFixed(1)} – {high.toFixed(1)}
           {unit}
         </p>
       )}
-      <div className="mt-3 flex w-full items-center gap-2.5 rounded-lg bg-device-surface px-3 py-2.5 font-mono text-[0.8em] text-device-text">
+      <div className="flex items-center gap-2.5 rounded-lg bg-device-screen px-3 py-2.5 font-mono text-[0.8em] text-device-text">
         <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${controlStatus.dotClassName}`} />
         <span>{controlStatus.label}</span>
       </div>
@@ -331,40 +301,39 @@ function GaugeColumn({
 }
 
 // Everything in profile_config that isn't a temp/humidity target — the
-// species profile itself and its light/UVB schedule — shown once to the
-// left of the gauges rather than repeated per-gauge.
+// species profile itself and its light/UVB schedule — shown once alongside
+// the reading cards rather than repeated per-card.
 function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null }) {
-  if (!profileConfig) {
-    return (
-      <div className="flex w-full max-w-[200px] flex-1 items-center justify-center rounded-xl bg-device-surface p-4 text-center text-[0.85em] text-device-text-tertiary">
-        No profile configured
-      </div>
-    );
-  }
-
   return (
-    <div className="flex w-full max-w-[200px] flex-1 flex-col justify-center gap-3 rounded-xl bg-device-surface p-4">
-      <div>
-        <p className="text-[0.75em] text-device-text-tertiary">Species Profile</p>
-        <p className="text-[1.1em] font-semibold text-device-text">{profileConfig.profile}</p>
-      </div>
-      <div className="border-t border-white/10 pt-3">
-        <p className="text-[0.75em] text-device-text-tertiary">Day Light</p>
-        <p className="text-[0.85em] text-device-text">
-          {profileConfig.day_light_on} – {profileConfig.day_light_off}
-        </p>
-      </div>
-      <div>
-        <p className="text-[0.75em] text-device-text-tertiary">UVB</p>
-        <p className="text-[0.85em] text-device-text">
-          {profileConfig.uvb_on} – {profileConfig.uvb_off}
-        </p>
-      </div>
-      <div>
-        <p className="text-[0.75em] text-device-text-tertiary">Timezone</p>
-        <p className="text-[0.85em] text-device-text">{profileConfig.timezone}</p>
-      </div>
-    </div>
+    <details className="group rounded-xl bg-device-surface">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 text-device-text">
+        <span className="flex flex-col gap-0.5">
+          <span className="text-[0.75em] text-device-text-tertiary">Species Profile</span>
+          <span className="text-[1.1em] font-semibold text-device-text">{profileConfig?.profile ?? 'Not configured'}</span>
+        </span>
+        <span className="text-device-text-tertiary transition group-open:rotate-180">▾</span>
+      </summary>
+      {profileConfig && (
+        <div className="flex flex-col gap-3 px-4 pb-4">
+          <div className="border-t border-white/10 pt-3">
+            <p className="text-[0.75em] text-device-text-tertiary">Day Light</p>
+            <p className="text-[0.85em] text-device-text">
+              {profileConfig.day_light_on} – {profileConfig.day_light_off}
+            </p>
+          </div>
+          <div>
+            <p className="text-[0.75em] text-device-text-tertiary">UVB</p>
+            <p className="text-[0.85em] text-device-text">
+              {profileConfig.uvb_on} – {profileConfig.uvb_off}
+            </p>
+          </div>
+          <div>
+            <p className="text-[0.75em] text-device-text-tertiary">Timezone</p>
+            <p className="text-[0.85em] text-device-text">{profileConfig.timezone}</p>
+          </div>
+        </div>
+      )}
+    </details>
   );
 }
 
@@ -652,209 +621,220 @@ export default function DeviceTimeline({
     <div className="flex flex-col gap-6">
       <AttentionCard items={outletAlerts} deviceId={data.device.device_id} device={data.device} />
 
-      <section className="rounded-2xl bg-device-card p-6 shadow-device">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex gap-2">
-            {(Object.keys(PRESET_LABELS) as Preset[]).map((key) => (
-              <Link
-                key={key}
-                href={`?preset=${key}`}
-                className={`rounded-full px-3 py-1 text-sm transition ${
-                  preset === key
-                    ? 'bg-device-accent/15 text-device-accent'
-                    : 'bg-device-surface text-device-text-secondary hover:bg-device-surface-hover'
-                }`}
-              >
-                {PRESET_LABELS[key]}
-              </Link>
-            ))}
-          </div>
-          <p className="text-xs text-device-text-tertiary">
-            {formatTime(fromMs)} – {formatTime(toMs)}
-          </p>
-        </div>
-
-        {retentionWarning && (
-          <p className="mb-4 rounded-lg border border-device-heating/30 bg-device-heating/10 px-3 py-2 text-xs text-device-heating">
-            {retentionWarning}
-          </p>
-        )}
-
-        {chartData.length === 0 ? (
-          <div className="rounded-xl bg-device-surface p-8 text-sm text-device-text-secondary">
-            No telemetry in this range.
-          </div>
-        ) : (
-          <div className="h-72 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={chartData} margin={{ left: 0, right: 0, top: 8, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.grid} />
-                <XAxis
-                  dataKey="t"
-                  type="number"
-                  domain={[fromMs, toMs]}
-                  tickFormatter={formatTime}
-                  stroke={CHART_COLORS.axis}
-                  fontSize={12}
-                />
-                <YAxis
-                  yAxisId="temp"
-                  stroke={CHART_COLORS.temp}
-                  fontSize={12}
-                  width={40}
-                  domain={tempDomain ?? ['auto', 'auto']}
-                />
-                <YAxis
-                  yAxisId="hum"
-                  orientation="right"
-                  stroke={CHART_COLORS.hum}
-                  fontSize={12}
-                  width={40}
-                  domain={humDomain ?? ['auto', 'auto']}
-                />
-                <Tooltip
-                  labelFormatter={(t) => formatTime(Number(t))}
-                  contentStyle={{ background: CHART_COLORS.tooltipBg, border: 'none', fontSize: 12 }}
-                  labelStyle={{ color: '#eee' }}
-                />
-                {segments.map((segment, i) => {
-                  const range = tempRangeC(segment.config.profileConfig);
-                  if (!range) return null;
-                  return (
-                    <ReferenceArea
-                      key={`temp-band-${i}`}
-                      yAxisId="temp"
-                      x1={segment.start}
-                      x2={segment.end}
-                      y1={celsiusToFahrenheit(range.low)}
-                      y2={celsiusToFahrenheit(range.high)}
-                      fill={CHART_COLORS.tempBand}
-                      fillOpacity={0.1}
-                      stroke="none"
-                    />
-                  );
-                })}
-                {segments.map((segment, i) => {
-                  const config = segment.config.profileConfig;
-                  if (config?.hum_low == null || config?.hum_high == null) return null;
-                  return (
-                    <ReferenceArea
-                      key={`hum-band-${i}`}
-                      yAxisId="hum"
-                      x1={segment.start}
-                      x2={segment.end}
-                      y1={config.hum_low}
-                      y2={config.hum_high}
-                      fill={CHART_COLORS.humBand}
-                      fillOpacity={0.1}
-                      stroke="none"
-                    />
-                  );
-                })}
-                <Line
-                  yAxisId="temp"
-                  type="stepAfter"
-                  dataKey="tempF"
-                  stroke={CHART_COLORS.temp}
-                  strokeWidth={2}
-                  dot={false}
-                  name="Temp °F"
-                  isAnimationActive={false}
-                  connectNulls={false}
-                />
-                <Line
-                  yAxisId="hum"
-                  type="stepAfter"
-                  dataKey="hum"
-                  stroke={CHART_COLORS.hum}
-                  strokeWidth={2}
-                  dot={false}
-                  name="Humidity %"
-                  isAnimationActive={false}
-                  connectNulls={false}
-                />
-                {offlineGaps.map((_, i) => (
-                  <Line
-                    key={`temp-gap-${i}`}
-                    yAxisId="temp"
-                    dataKey={`gapTempF${i}`}
-                    stroke={CHART_COLORS.offlineGap}
-                    strokeWidth={3}
-                    strokeDasharray="4 3"
-                    dot={false}
-                    legendType="none"
-                    isAnimationActive={false}
-                    connectNulls
-                  />
-                ))}
-                {offlineGaps.map((_, i) => (
-                  <Line
-                    key={`hum-gap-${i}`}
-                    yAxisId="hum"
-                    dataKey={`gapHum${i}`}
-                    stroke={CHART_COLORS.offlineGap}
-                    strokeWidth={3}
-                    strokeDasharray="4 3"
-                    dot={false}
-                    legendType="none"
-                    isAnimationActive={false}
-                    connectNulls
-                  />
-                ))}
-                <ReferenceLine yAxisId="temp" x={scrubMs} stroke={CHART_COLORS.scrubLine} strokeDasharray="4 4" />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-
-        <div className="relative mt-3 h-3 w-full">
-          {timelineEntries.map((entry) => (
-            <span
-              key={entry.id}
-              title={entry.kind === 'log' ? `[${entry.row.tag}] ${entry.row.message}` : entry.message}
-              className={`absolute top-0 h-3 w-1 -translate-x-1/2 rounded-full ${LEVEL_DOT_CLASSNAMES[entry.level]}`}
-              style={{ left: `${((new Date(entry.createdAt).getTime() - fromMs) / (toMs - fromMs)) * 100}%` }}
-            />
-          ))}
-        </div>
-
-        <input
-          type="range"
-          min={fromMs}
-          max={toMs}
-          value={scrubMs}
-          onChange={(event) => setScrubMs(Number(event.target.value))}
-          className="mt-2 w-full accent-device-accent"
-        />
-
-        <div className="mt-3 flex items-center justify-center gap-4">
-          <button
-            type="button"
-            onClick={() => prevEventIndex !== -1 && setScrubMs(eventTimestamps[prevEventIndex])}
-            disabled={prevEventIndex === -1}
-            className="rounded bg-device-surface px-3 py-1 text-sm text-device-text-secondary transition hover:bg-device-surface-hover disabled:cursor-not-allowed disabled:opacity-30"
-          >
-            ◀ Prev
-          </button>
-          <p className="text-xs text-device-text-tertiary">
-            {eventsReached}/{eventTimestamps.length} events
-          </p>
-          <button
-            type="button"
-            onClick={() => nextEventIndex !== -1 && setScrubMs(eventTimestamps[nextEventIndex])}
-            disabled={nextEventIndex === -1}
-            className="rounded bg-device-surface px-3 py-1 text-sm text-device-text-secondary transition hover:bg-device-surface-hover disabled:cursor-not-allowed disabled:opacity-30"
-          >
-            Next ▶
-          </button>
-        </div>
-      </section>
-
       {isOfflineAtScrub ? (
         <OfflineNotice lastSeen={data.device.last_seen} />
       ) : (
         <ContextPanel state={state} />
       )}
+
+      {/* Collapsed by default — the history chart/scrubber is a power-user
+          drill-down, not something a mobile visitor needs on first paint.
+          Native <details> keeps this keyboard/screen-reader accessible for
+          free instead of hand-rolling open/close state. */}
+      <details className="group rounded-2xl bg-device-card shadow-device">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 text-device-text sm:p-6">
+          <span className="text-[1.1em] font-medium">Temperature &amp; humidity history</span>
+          <span className="text-device-text-tertiary transition group-open:rotate-180">▾</span>
+        </summary>
+        <div className="px-4 pb-4 sm:px-6 sm:pb-6">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap gap-2">
+              {(Object.keys(PRESET_LABELS) as Preset[]).map((key) => (
+                <Link
+                  key={key}
+                  href={`?preset=${key}`}
+                  className={`rounded-full px-3 py-1 text-sm transition ${
+                    preset === key
+                      ? 'bg-device-accent/15 text-device-accent'
+                      : 'bg-device-surface text-device-text-secondary hover:bg-device-surface-hover'
+                  }`}
+                >
+                  {PRESET_LABELS[key]}
+                </Link>
+              ))}
+            </div>
+            <p className="text-xs text-device-text-tertiary">
+              {formatTime(fromMs)} – {formatTime(toMs)}
+            </p>
+          </div>
+
+          {retentionWarning && (
+            <p className="mb-4 rounded-lg border border-device-heating/30 bg-device-heating/10 px-3 py-2 text-xs text-device-heating">
+              {retentionWarning}
+            </p>
+          )}
+
+          {chartData.length === 0 ? (
+            <div className="rounded-xl bg-device-surface p-8 text-sm text-device-text-secondary">
+              No telemetry in this range.
+            </div>
+          ) : (
+            <div className="h-72 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={chartData} margin={{ left: 0, right: 0, top: 8, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={CHART_COLORS.grid} />
+                  <XAxis
+                    dataKey="t"
+                    type="number"
+                    domain={[fromMs, toMs]}
+                    tickFormatter={formatTime}
+                    stroke={CHART_COLORS.axis}
+                    fontSize={12}
+                  />
+                  <YAxis
+                    yAxisId="temp"
+                    stroke={CHART_COLORS.temp}
+                    fontSize={12}
+                    width={40}
+                    domain={tempDomain ?? ['auto', 'auto']}
+                  />
+                  <YAxis
+                    yAxisId="hum"
+                    orientation="right"
+                    stroke={CHART_COLORS.hum}
+                    fontSize={12}
+                    width={40}
+                    domain={humDomain ?? ['auto', 'auto']}
+                  />
+                  <Tooltip
+                    labelFormatter={(t) => formatTime(Number(t))}
+                    contentStyle={{ background: CHART_COLORS.tooltipBg, border: 'none', fontSize: 12 }}
+                    labelStyle={{ color: '#eee' }}
+                  />
+                  {segments.map((segment, i) => {
+                    const range = tempRangeC(segment.config.profileConfig);
+                    if (!range) return null;
+                    return (
+                      <ReferenceArea
+                        key={`temp-band-${i}`}
+                        yAxisId="temp"
+                        x1={segment.start}
+                        x2={segment.end}
+                        y1={celsiusToFahrenheit(range.low)}
+                        y2={celsiusToFahrenheit(range.high)}
+                        fill={CHART_COLORS.tempBand}
+                        fillOpacity={0.1}
+                        stroke="none"
+                      />
+                    );
+                  })}
+                  {segments.map((segment, i) => {
+                    const config = segment.config.profileConfig;
+                    if (config?.hum_low == null || config?.hum_high == null) return null;
+                    return (
+                      <ReferenceArea
+                        key={`hum-band-${i}`}
+                        yAxisId="hum"
+                        x1={segment.start}
+                        x2={segment.end}
+                        y1={config.hum_low}
+                        y2={config.hum_high}
+                        fill={CHART_COLORS.humBand}
+                        fillOpacity={0.1}
+                        stroke="none"
+                      />
+                    );
+                  })}
+                  <Line
+                    yAxisId="temp"
+                    type="stepAfter"
+                    dataKey="tempF"
+                    stroke={CHART_COLORS.temp}
+                    strokeWidth={2}
+                    dot={false}
+                    name="Temp °F"
+                    isAnimationActive={false}
+                    connectNulls={false}
+                  />
+                  <Line
+                    yAxisId="hum"
+                    type="stepAfter"
+                    dataKey="hum"
+                    stroke={CHART_COLORS.hum}
+                    strokeWidth={2}
+                    dot={false}
+                    name="Humidity %"
+                    isAnimationActive={false}
+                    connectNulls={false}
+                  />
+                  {offlineGaps.map((_, i) => (
+                    <Line
+                      key={`temp-gap-${i}`}
+                      yAxisId="temp"
+                      dataKey={`gapTempF${i}`}
+                      stroke={CHART_COLORS.offlineGap}
+                      strokeWidth={3}
+                      strokeDasharray="4 3"
+                      dot={false}
+                      legendType="none"
+                      isAnimationActive={false}
+                      connectNulls
+                    />
+                  ))}
+                  {offlineGaps.map((_, i) => (
+                    <Line
+                      key={`hum-gap-${i}`}
+                      yAxisId="hum"
+                      dataKey={`gapHum${i}`}
+                      stroke={CHART_COLORS.offlineGap}
+                      strokeWidth={3}
+                      strokeDasharray="4 3"
+                      dot={false}
+                      legendType="none"
+                      isAnimationActive={false}
+                      connectNulls
+                    />
+                  ))}
+                  <ReferenceLine yAxisId="temp" x={scrubMs} stroke={CHART_COLORS.scrubLine} strokeDasharray="4 4" />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          <div className="relative mt-3 h-3 w-full">
+            {timelineEntries.map((entry) => (
+              <span
+                key={entry.id}
+                title={entry.kind === 'log' ? `[${entry.row.tag}] ${entry.row.message}` : entry.message}
+                className={`absolute top-0 h-3 w-1 -translate-x-1/2 rounded-full ${LEVEL_DOT_CLASSNAMES[entry.level]}`}
+                style={{ left: `${((new Date(entry.createdAt).getTime() - fromMs) / (toMs - fromMs)) * 100}%` }}
+              />
+            ))}
+          </div>
+
+          <input
+            type="range"
+            min={fromMs}
+            max={toMs}
+            value={scrubMs}
+            onChange={(event) => setScrubMs(Number(event.target.value))}
+            className="mt-2 w-full accent-device-accent"
+          />
+
+          <div className="mt-3 flex items-center justify-center gap-4">
+            <button
+              type="button"
+              onClick={() => prevEventIndex !== -1 && setScrubMs(eventTimestamps[prevEventIndex])}
+              disabled={prevEventIndex === -1}
+              className="rounded bg-device-surface px-3 py-1 text-sm text-device-text-secondary transition hover:bg-device-surface-hover disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              ◀ Prev
+            </button>
+            <p className="text-xs text-device-text-tertiary">
+              {eventsReached}/{eventTimestamps.length} events
+            </p>
+            <button
+              type="button"
+              onClick={() => nextEventIndex !== -1 && setScrubMs(eventTimestamps[nextEventIndex])}
+              disabled={nextEventIndex === -1}
+              className="rounded bg-device-surface px-3 py-1 text-sm text-device-text-secondary transition hover:bg-device-surface-hover disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              Next ▶
+            </button>
+          </div>
+        </div>
+      </details>
+
       <EventLog data={data} entries={timelineEntries} />
       <AlertHistorySection entries={outletAlertHistory} />
     </div>
@@ -872,7 +852,7 @@ function AttentionCard({ items, deviceId, device }: { items: OutletAlertRow[]; d
   if (items.length === 0) return null;
 
   return (
-    <section className="rounded-2xl border border-device-alert/40 bg-device-alert/10 p-6 shadow-device">
+    <section className="rounded-2xl border border-device-alert/40 bg-device-alert/10 p-4 shadow-device sm:p-6">
       <h2 className="mb-1 flex items-center gap-2 text-[1.1em] font-semibold text-device-alert">
         <span>⚠️</span> Needs attention
       </h2>
@@ -993,7 +973,7 @@ function AttentionAlertItem({
 // last-known reading/outlet layout would misrepresent it as live.
 function OfflineNotice({ lastSeen }: { lastSeen: string }) {
   return (
-    <section className="rounded-2xl bg-device-screen p-6 shadow-device">
+    <section className="rounded-2xl bg-device-screen p-4 shadow-device sm:p-6">
       <div className="flex items-center gap-3 rounded-xl bg-device-surface px-4 py-4 text-device-text-secondary">
         <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full bg-device-alert" />
         <p className="text-sm">
@@ -1011,7 +991,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
   const mister = state.outlets.find((outlet) => outlet.role === 'Mister');
 
   return (
-    <section className="rounded-2xl bg-device-screen p-6 shadow-device">
+    <section className="rounded-2xl bg-device-screen p-4 shadow-device sm:p-6">
       <h2 className="mb-4 text-[1.1em] text-device-text">State at {formatTime(new Date(state.timestamp).getTime())}</h2>
 
       {state.config.isFallback && (
@@ -1021,9 +1001,9 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
         </p>
       )}
 
-      <div className="mb-6 flex flex-wrap gap-8">
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <ProfileSummary profileConfig={state.config.profileConfig} />
-        <GaugeColumn
+        <ReadingCard
           label="Current Temperature"
           value={state.tempC != null ? celsiusToFahrenheit(state.tempC) : null}
           unit="°F"
@@ -1038,7 +1018,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
           automationEnabled={state.automationEnabled}
           controlStatus={deriveTempStatus(state)}
         />
-        <GaugeColumn
+        <ReadingCard
           label="Current Humidity"
           value={state.hum}
           unit="%"
@@ -1114,63 +1094,67 @@ function EventLog({ data, entries }: { data: DeviceTimelineData; entries: Timeli
   const newestFirst = useMemo(() => [...entries].reverse(), [entries]);
 
   return (
-    <section className="rounded-2xl bg-device-card p-6 shadow-device">
-      <h2 className="mb-4 text-[1.1em] text-device-text">Event log</h2>
-
-      {newestFirst.length === 0 ? (
-        <div className="rounded-xl bg-device-surface p-8 text-sm text-device-text-secondary">
-          No events in this range.
-        </div>
-      ) : (
-        <div className="flex max-h-[420px] flex-col gap-2.5 overflow-y-auto">
-          {newestFirst.map((entry) => {
-            if (entry.kind === 'health') {
-              return (
-                <div key={entry.id} className="flex items-center gap-3 rounded-lg bg-device-surface px-3 py-2.5">
-                  <div className="w-[26px] flex-shrink-0 text-center text-[1.3em]">{entry.icon}</div>
-                  <div className="w-[130px] flex-shrink-0 text-[0.8em] text-device-text-tertiary">
-                    {formatTime(new Date(entry.createdAt).getTime())}
+    <details className="group rounded-2xl bg-device-card shadow-device">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 text-device-text sm:p-6">
+        <span className="text-[1.1em] font-medium">Event log</span>
+        <span className="text-device-text-tertiary transition group-open:rotate-180">▾</span>
+      </summary>
+      <div className="px-4 pb-4 sm:px-6 sm:pb-6">
+        {newestFirst.length === 0 ? (
+          <div className="rounded-xl bg-device-surface p-8 text-sm text-device-text-secondary">
+            No events in this range.
+          </div>
+        ) : (
+          <div className="flex max-h-[420px] flex-col gap-2.5 overflow-y-auto">
+            {newestFirst.map((entry) => {
+              if (entry.kind === 'health') {
+                return (
+                  <div key={entry.id} className="flex items-start gap-3 rounded-lg bg-device-surface px-3 py-2.5">
+                    <div className="w-[22px] flex-shrink-0 text-center text-[1.3em] sm:w-[26px]">{entry.icon}</div>
+                    <div className="w-[90px] flex-shrink-0 text-[0.8em] text-device-text-tertiary sm:w-[130px]">
+                      {formatTime(new Date(entry.createdAt).getTime())}
+                    </div>
+                    <div className="min-w-0 flex-1 text-[0.92em] text-device-text">{entry.message}</div>
                   </div>
-                  <div className="flex-1 text-[0.92em] text-device-text">{entry.message}</div>
-                </div>
-              );
-            }
+                );
+              }
 
-            const row = entry.row;
-            const isTest = isTestReason(row.message);
-            return (
-              <div key={entry.id} className="flex items-center gap-3 rounded-lg bg-device-surface px-3 py-2.5">
-                <div className="w-[26px] flex-shrink-0 text-center text-[1.3em]">
-                  {iconForLog(row, data.device, data.configLogs)}
-                </div>
-                <div className="w-[130px] flex-shrink-0 text-[0.8em] text-device-text-tertiary">
-                  {displayTime(row.created_at, row.device_time)}
-                </div>
-                <div className="flex-1 text-[0.92em] text-device-text">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span>{row.message}</span>
-                    {isTest && (
-                      <span
-                        title="Triggered by the device's /climate-test page — a real outlet change, but not driven by an actual sensor reading"
-                        className={`rounded px-1.5 py-0.5 text-[0.7em] font-mono font-semibold ${GAUGE_COLORS.neutral.badgeClassName}`}
-                      >
-                        TEST
-                      </span>
+              const row = entry.row;
+              const isTest = isTestReason(row.message);
+              return (
+                <div key={entry.id} className="flex items-start gap-3 rounded-lg bg-device-surface px-3 py-2.5">
+                  <div className="w-[22px] flex-shrink-0 text-center text-[1.3em] sm:w-[26px]">
+                    {iconForLog(row, data.device, data.configLogs)}
+                  </div>
+                  <div className="w-[90px] flex-shrink-0 text-[0.8em] text-device-text-tertiary sm:w-[130px]">
+                    {displayTime(row.created_at, row.device_time)}
+                  </div>
+                  <div className="min-w-0 flex-1 text-[0.92em] text-device-text">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span>{row.message}</span>
+                      {isTest && (
+                        <span
+                          title="Triggered by the device's /climate-test page — a real outlet change, but not driven by an actual sensor reading"
+                          className={`rounded px-1.5 py-0.5 text-[0.7em] font-mono font-semibold ${GAUGE_COLORS.neutral.badgeClassName}`}
+                        >
+                          TEST
+                        </span>
+                      )}
+                    </div>
+                    {row.temp_c != null && row.hum != null && (
+                      <div className="mt-0.5 text-[0.75em] text-device-text-tertiary">
+                        {celsiusToFahrenheit(row.temp_c).toFixed(1)}°F / {row.hum.toFixed(1)}% RH
+                        {isTest && ' (real reading — not what drove this test)'}
+                      </div>
                     )}
                   </div>
-                  {row.temp_c != null && row.hum != null && (
-                    <div className="mt-0.5 text-[0.75em] text-device-text-tertiary">
-                      {celsiusToFahrenheit(row.temp_c).toFixed(1)}°F / {row.hum.toFixed(1)}% RH
-                      {isTest && ' (real reading — not what drove this test)'}
-                    </div>
-                  )}
                 </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </section>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -1187,59 +1171,63 @@ const HISTORY_STATUS_META: Record<OutletAlertRow['status'], { label: string; cla
 // ones the AttentionCard above shows.
 function AlertHistorySection({ entries }: { entries: OutletAlertHistoryEntry[] }) {
   return (
-    <section className="rounded-2xl bg-device-card p-6 shadow-device">
-      <h2 className="mb-4 text-[1.1em] text-device-text">Alert history</h2>
-
-      {entries.length === 0 ? (
-        <div className="rounded-xl bg-device-surface p-8 text-sm text-device-text-secondary">
-          No outlet alerts recorded for this device.
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2.5">
-          {entries.map((entry) => (
-            <div key={entry.id} className="flex items-start gap-3 rounded-lg bg-device-surface px-3 py-2.5">
-              <div className="w-[26px] flex-shrink-0 text-center text-[1.3em]">{iconForRole(entry.role)}</div>
-              <div className="flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium text-device-text">{entry.role}</span>
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-[0.7em] font-mono font-semibold ${HISTORY_STATUS_META[entry.status].className}`}
-                  >
-                    {HISTORY_STATUS_META[entry.status].label}
-                  </span>
-                  <span className="text-[0.75em] text-device-text-tertiary">
-                    detected {displayTime(entry.detected_at, null)}
-                  </span>
-                </div>
-                <div className="mt-0.5 text-[0.85em] text-device-text">
-                  {entry.logged_state ? 'ON' : 'OFF'} — {reasonOnly(entry.last_logged_message)}
-                </div>
-                <div className="mt-1 flex flex-col gap-0.5 text-[0.75em] text-device-text-tertiary">
-                  {entry.escalated_at && (
-                    <span>
-                      Escalated {displayTime(entry.escalated_at, null)}
-                      {entry.escalatedByEmail ? ` by ${entry.escalatedByEmail}` : ''}
+    <details className="group rounded-2xl bg-device-card shadow-device">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 text-device-text sm:p-6">
+        <span className="text-[1.1em] font-medium">Alert history</span>
+        <span className="text-device-text-tertiary transition group-open:rotate-180">▾</span>
+      </summary>
+      <div className="px-4 pb-4 sm:px-6 sm:pb-6">
+        {entries.length === 0 ? (
+          <div className="rounded-xl bg-device-surface p-8 text-sm text-device-text-secondary">
+            No outlet alerts recorded for this device.
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2.5">
+            {entries.map((entry) => (
+              <div key={entry.id} className="flex items-start gap-3 rounded-lg bg-device-surface px-3 py-2.5">
+                <div className="w-[22px] flex-shrink-0 text-center text-[1.3em] sm:w-[26px]">{iconForRole(entry.role)}</div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-device-text">{entry.role}</span>
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[0.7em] font-mono font-semibold ${HISTORY_STATUS_META[entry.status].className}`}
+                    >
+                      {HISTORY_STATUS_META[entry.status].label}
                     </span>
-                  )}
-                  {entry.closed_at && (
-                    <span>
-                      Closed {displayTime(entry.closed_at, null)}
-                      {entry.closedByEmail ? ` by ${entry.closedByEmail}` : ''}
+                    <span className="text-[0.75em] text-device-text-tertiary">
+                      detected {displayTime(entry.detected_at, null)}
                     </span>
-                  )}
-                  {entry.auto_resolved_at && (
-                    <span>
-                      Auto-resolved {displayTime(entry.auto_resolved_at, null)} — mismatch cleared on its own before
-                      anyone reviewed it
-                    </span>
-                  )}
-                  {entry.status === 'open' && <span>Still open</span>}
+                  </div>
+                  <div className="mt-0.5 text-[0.85em] text-device-text">
+                    {entry.logged_state ? 'ON' : 'OFF'} — {reasonOnly(entry.last_logged_message)}
+                  </div>
+                  <div className="mt-1 flex flex-col gap-0.5 text-[0.75em] text-device-text-tertiary">
+                    {entry.escalated_at && (
+                      <span>
+                        Escalated {displayTime(entry.escalated_at, null)}
+                        {entry.escalatedByEmail ? ` by ${entry.escalatedByEmail}` : ''}
+                      </span>
+                    )}
+                    {entry.closed_at && (
+                      <span>
+                        Closed {displayTime(entry.closed_at, null)}
+                        {entry.closedByEmail ? ` by ${entry.closedByEmail}` : ''}
+                      </span>
+                    )}
+                    {entry.auto_resolved_at && (
+                      <span>
+                        Auto-resolved {displayTime(entry.auto_resolved_at, null)} — mismatch cleared on its own before
+                        anyone reviewed it
+                      </span>
+                    )}
+                    {entry.status === 'open' && <span>Still open</span>}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
+            ))}
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
