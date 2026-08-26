@@ -164,10 +164,10 @@ function DeviceRows({ fleet, latestFwVersion }: { fleet: DeviceHealth[]; latestF
       <thead className="bg-device-surface text-device-text-secondary">
         <tr>
           <th className="px-4 py-3 font-medium">Device</th>
-          <th className="px-4 py-3 font-medium">Status</th>
-          <th className="px-4 py-3 font-medium">Attention</th>
           <th className="px-4 py-3 font-medium">Temp</th>
           <th className="px-4 py-3 font-medium">Humidity</th>
+          <th className="px-4 py-3 font-medium">Device Status</th>
+          <th className="px-4 py-3 font-medium">Attention</th>
           <th className="px-4 py-3 font-medium">Last seen</th>
           <th className="px-4 py-3 font-medium">Firmware</th>
           <th className="px-4 py-3 font-medium">Backend</th>
@@ -198,6 +198,8 @@ function DeviceRows({ fleet, latestFwVersion }: { fleet: DeviceHealth[]; latestF
                 </Link>
                 <div className="text-xs text-device-text-tertiary">{entry.device.device_id}</div>
               </td>
+              <RangeCell value={tempF} unit="°F" badge={tempBadge} />
+              <RangeCell value={entry.latestTelemetry?.hum ?? null} unit="%" badge={humBadge} />
               <td className="px-4 py-3">
                 <div className="flex items-center gap-2 font-mono text-xs">
                   <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${status.dot}`} />
@@ -210,8 +212,6 @@ function DeviceRows({ fleet, latestFwVersion }: { fleet: DeviceHealth[]; latestF
               <td className="px-4 py-3">
                 <AttentionCell alerts={entry.activeOutletAlerts} href={href} />
               </td>
-              <RangeCell value={tempF} unit="°F" badge={tempBadge} />
-              <RangeCell value={entry.latestTelemetry?.hum ?? null} unit="%" badge={humBadge} />
               <td className="px-4 py-3 text-device-text-secondary">
                 {formatLastSeen(entry.device.last_seen, entry.isStale)}
               </td>
