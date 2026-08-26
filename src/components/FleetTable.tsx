@@ -43,20 +43,49 @@ function deriveRangeBadge(
   lowLabel: string,
   highLabel: string,
   lowColor: typeof GAUGE_COLORS.cool,
-): { className: string; label: string } {
-  if (!enabled || low == null || high == null) {
-    return { className: GAUGE_COLORS.neutral.badgeClassName, label: enabled ? 'NO TARGET' : 'DISABLED' };
+): { className: string; textClassName: string; label: string } {
+  const hasRange = low != null && high != null;
+
+  // The value's color tracks where the reading sits against the device's
+  // species-profile range, independent of whether automation is enabled —
+  // a disabled device still has a real target (just no outlet acting on
+  // it), so the number itself should still read as too-cold/too-hot/etc.
+  // The badge below it is the one that keeps announcing DISABLED/NO
+  // TARGET/NO DATA, since that's a different fact (is anything controlling
+  // this right now) from "where is the reading relative to target."
+  let textClassName: string = GAUGE_COLORS.neutral.textClassName;
+  if (hasRange && value != null) {
+    if (value < low!) textClassName = lowColor.textClassName;
+    else if (value > high!) textClassName = GAUGE_COLORS.alert.textClassName;
+    else textClassName = GAUGE_COLORS.good.textClassName;
   }
-  if (value == null) return { className: GAUGE_COLORS.neutral.badgeClassName, label: 'NO DATA' };
-  if (value < low) return { className: lowColor.badgeClassName, label: lowLabel };
-  if (value > high) return { className: GAUGE_COLORS.alert.badgeClassName, label: highLabel };
-  return { className: GAUGE_COLORS.good.badgeClassName, label: 'IN RANGE' };
+
+  if (!enabled || !hasRange) {
+    return { className: GAUGE_COLORS.neutral.badgeClassName, textClassName, label: enabled ? 'NO TARGET' : 'DISABLED' };
+  }
+  if (value == null) return { className: GAUGE_COLORS.neutral.badgeClassName, textClassName, label: 'NO DATA' };
+  if (value < low!) return { className: lowColor.badgeClassName, textClassName, label: lowLabel };
+  if (value > high!) return { className: GAUGE_COLORS.alert.badgeClassName, textClassName, label: highLabel };
+  return { className: GAUGE_COLORS.good.badgeClassName, textClassName, label: 'IN RANGE' };
 }
 
-function RangeCell({ value, unit, badge }: { value: number | null; unit: string; badge: { className: string; label: string } }) {
+// Value text is colorized the same way as the badge below it — cool/dry
+// when below the device's own species-profile target (custom or preset,
+// doesn't matter here, only the resolved temp_low/high_c and hum_low/high
+// on that device's profile_config), alert when above, good when in range —
+// so the number itself reads at a glance without having to read the badge.
+function RangeCell({
+  value,
+  unit,
+  badge,
+}: {
+  value: number | null;
+  unit: string;
+  badge: { className: string; textClassName: string; label: string };
+}) {
   return (
     <td className="px-4 py-3">
-      <div className="font-mono text-device-text">{value != null ? `${value.toFixed(1)}${unit}` : '—'}</div>
+      <div className={`font-mono ${badge.textClassName}`}>{value != null ? `${value.toFixed(1)}${unit}` : '—'}</div>
       <div className={`mt-1 inline-block rounded px-2 py-0.5 text-[0.7em] font-mono font-semibold ${badge.className}`}>
         {badge.label}
       </div>
@@ -64,7 +93,7 @@ function RangeCell({ value, unit, badge }: { value: number | null; unit: string;
   );
 }
 
-function deriveTempBadge(telemetry: TelemetryRow | null, profileConfig: ProfileConfig): { className: string; label: string } {
+function deriveTempBadge(telemetry: TelemetryRow | null, profileConfig: ProfileConfig): { className: string; textClassName: string; label: string } {
   const range = tempRangeC(profileConfig);
   return deriveRangeBadge(
     telemetry ? celsiusToFahrenheit(telemetry.temp_c) : null,
@@ -77,7 +106,7 @@ function deriveTempBadge(telemetry: TelemetryRow | null, profileConfig: ProfileC
   );
 }
 
-function deriveHumidityBadge(telemetry: TelemetryRow | null, profileConfig: ProfileConfig): { className: string; label: string } {
+function deriveHumidityBadge(telemetry: TelemetryRow | null, profileConfig: ProfileConfig): { className: string; textClassName: string; label: string } {
   return deriveRangeBadge(
     telemetry?.hum ?? null,
     profileConfig.hum_low,
