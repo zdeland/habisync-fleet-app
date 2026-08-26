@@ -124,9 +124,86 @@ function AttentionCell({ alerts, href }: { alerts: OutletAlertRow[]; href: strin
   );
 }
 
-export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
+// Shared thead + tbody markup for both the active table and the collapsed
+// offline one below it — kept as one component so the two sections can't
+// drift out of sync on columns.
+function DeviceRows({ fleet, latestFwVersion }: { fleet: DeviceHealth[]; latestFwVersion: string | null }) {
   const router = useRouter();
 
+  return (
+    <table className="min-w-full divide-y divide-white/10 text-left text-sm">
+      <thead className="bg-device-surface text-device-text-secondary">
+        <tr>
+          <th className="px-4 py-3 font-medium">Device</th>
+          <th className="px-4 py-3 font-medium">Status</th>
+          <th className="px-4 py-3 font-medium">Attention</th>
+          <th className="px-4 py-3 font-medium">Temp</th>
+          <th className="px-4 py-3 font-medium">Humidity</th>
+          <th className="px-4 py-3 font-medium">Last seen</th>
+          <th className="px-4 py-3 font-medium">Firmware</th>
+          <th className="px-4 py-3 font-medium">Backend</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-white/10">
+        {fleet.map((entry) => {
+          const status = STATUS_META[deriveStatus(entry)];
+          const href = `/devices/${entry.device.device_id}`;
+          const tempF = entry.latestTelemetry ? celsiusToFahrenheit(entry.latestTelemetry.temp_c) : null;
+          const tempBadge = deriveTempBadge(entry.latestTelemetry, entry.device.profile_config);
+          const humBadge = deriveHumidityBadge(entry.latestTelemetry, entry.device.profile_config);
+          const isOutdated =
+            latestFwVersion != null && compareFwVersions(entry.device.fw_version, latestFwVersion) < 0;
+          return (
+            <tr
+              key={entry.device.device_id}
+              onClick={() => router.push(href)}
+              className="cursor-pointer transition hover:bg-device-surface-hover"
+            >
+              <td className="px-4 py-3">
+                <Link
+                  href={href}
+                  onClick={(event) => event.stopPropagation()}
+                  className="font-medium text-device-text hover:text-device-accent hover:underline"
+                >
+                  {entry.device.name}
+                </Link>
+                <div className="text-xs text-device-text-tertiary">{entry.device.device_id}</div>
+              </td>
+              <td className="px-4 py-3">
+                <div className="flex items-center gap-2 font-mono text-xs">
+                  <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${status.dot}`} />
+                  <span>{status.label}</span>
+                </div>
+                <div className="mt-1 text-xs text-device-text-tertiary">
+                  {entry.recentErrorCount} error{entry.recentErrorCount === 1 ? '' : 's'} (24h)
+                </div>
+              </td>
+              <td className="px-4 py-3">
+                <AttentionCell alerts={entry.activeOutletAlerts} href={href} />
+              </td>
+              <RangeCell value={tempF} unit="°F" badge={tempBadge} />
+              <RangeCell value={entry.latestTelemetry?.hum ?? null} unit="%" badge={humBadge} />
+              <td className="px-4 py-3 text-device-text-secondary">
+                {formatLastSeen(entry.device.last_seen, entry.isStale)}
+              </td>
+              <td className="px-4 py-3 text-device-text-secondary">
+                <span className={isOutdated ? 'text-device-heating' : undefined}>{entry.device.fw_version}</span>
+                {isOutdated && (
+                  <div className="mt-1 inline-block rounded px-2 py-0.5 text-[0.7em] font-mono font-semibold border border-device-heating/40 bg-device-heating/10 text-device-heating">
+                    OUTDATED
+                  </div>
+                )}
+              </td>
+              <td className="px-4 py-3 text-device-text-secondary">{entry.device.active_backend}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
   // "Latest" here means the newest version reported anywhere in this fleet
   // right now — there's no external firmware release feed this read-only
   // app can check against, only what devices have actually reported.
@@ -136,77 +213,35 @@ export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
     null,
   );
 
+  // "Offline" here reuses the same staleness signal as the Status column
+  // (no heartbeat in the last 10 min, see STALE_AFTER_MS in lib/queries.ts)
+  // rather than introducing a second definition of down.
+  const activeFleet = fleet.filter((entry) => !entry.isStale);
+  const offlineFleet = fleet.filter((entry) => entry.isStale);
+
   return (
-    <div className="overflow-hidden rounded-xl">
-      <table className="min-w-full divide-y divide-white/10 text-left text-sm">
-        <thead className="bg-device-surface text-device-text-secondary">
-          <tr>
-            <th className="px-4 py-3 font-medium">Device</th>
-            <th className="px-4 py-3 font-medium">Status</th>
-            <th className="px-4 py-3 font-medium">Attention</th>
-            <th className="px-4 py-3 font-medium">Temp</th>
-            <th className="px-4 py-3 font-medium">Humidity</th>
-            <th className="px-4 py-3 font-medium">Last seen</th>
-            <th className="px-4 py-3 font-medium">Firmware</th>
-            <th className="px-4 py-3 font-medium">Backend</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-white/10">
-          {fleet.map((entry) => {
-            const status = STATUS_META[deriveStatus(entry)];
-            const href = `/devices/${entry.device.device_id}`;
-            const tempF = entry.latestTelemetry ? celsiusToFahrenheit(entry.latestTelemetry.temp_c) : null;
-            const tempBadge = deriveTempBadge(entry.latestTelemetry, entry.device.profile_config);
-            const humBadge = deriveHumidityBadge(entry.latestTelemetry, entry.device.profile_config);
-            const isOutdated =
-              latestFwVersion != null && compareFwVersions(entry.device.fw_version, latestFwVersion) < 0;
-            return (
-              <tr
-                key={entry.device.device_id}
-                onClick={() => router.push(href)}
-                className="cursor-pointer transition hover:bg-device-surface-hover"
-              >
-                <td className="px-4 py-3">
-                  <Link
-                    href={href}
-                    onClick={(event) => event.stopPropagation()}
-                    className="font-medium text-device-text hover:text-device-accent hover:underline"
-                  >
-                    {entry.device.name}
-                  </Link>
-                  <div className="text-xs text-device-text-tertiary">{entry.device.device_id}</div>
-                </td>
-                <td className="px-4 py-3">
-                  <div className="flex items-center gap-2 font-mono text-xs">
-                    <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${status.dot}`} />
-                    <span>{status.label}</span>
-                  </div>
-                  <div className="mt-1 text-xs text-device-text-tertiary">
-                    {entry.recentErrorCount} error{entry.recentErrorCount === 1 ? '' : 's'} (24h)
-                  </div>
-                </td>
-                <td className="px-4 py-3">
-                  <AttentionCell alerts={entry.activeOutletAlerts} href={href} />
-                </td>
-                <RangeCell value={tempF} unit="°F" badge={tempBadge} />
-                <RangeCell value={entry.latestTelemetry?.hum ?? null} unit="%" badge={humBadge} />
-                <td className="px-4 py-3 text-device-text-secondary">
-                  {formatLastSeen(entry.device.last_seen, entry.isStale)}
-                </td>
-                <td className="px-4 py-3 text-device-text-secondary">
-                  <span className={isOutdated ? 'text-device-heating' : undefined}>{entry.device.fw_version}</span>
-                  {isOutdated && (
-                    <div className="mt-1 inline-block rounded px-2 py-0.5 text-[0.7em] font-mono font-semibold border border-device-heating/40 bg-device-heating/10 text-device-heating">
-                      OUTDATED
-                    </div>
-                  )}
-                </td>
-                <td className="px-4 py-3 text-device-text-secondary">{entry.device.active_backend}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    <div className="flex flex-col gap-4">
+      {activeFleet.length > 0 && (
+        <div className="overflow-hidden rounded-xl">
+          <DeviceRows fleet={activeFleet} latestFwVersion={latestFwVersion} />
+        </div>
+      )}
+      {offlineFleet.length > 0 && (
+        // Native <details> keeps this keyboard/screen-reader accessible for
+        // free instead of hand-rolling open/close state (same pattern as
+        // DeviceTimeline.tsx's collapsible sections).
+        <details className="group overflow-hidden rounded-xl bg-device-surface">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-device-text-secondary">
+            <span className="font-medium">
+              Offline devices ({offlineFleet.length})
+            </span>
+            <span className="text-device-text-tertiary transition group-open:rotate-180">▾</span>
+          </summary>
+          <div className="overflow-hidden rounded-xl">
+            <DeviceRows fleet={offlineFleet} latestFwVersion={latestFwVersion} />
+          </div>
+        </details>
+      )}
     </div>
   );
 }
