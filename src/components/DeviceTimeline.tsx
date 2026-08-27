@@ -255,11 +255,24 @@ function ReadingCard({
   // thresholds are real even when nothing's currently acting on them, so
   // "TOO HOT"/"IN RANGE"/etc. is more useful here than a blanket AUTOMATION
   // DISABLED that would otherwise contradict the card's own color.
+  //
+  // belowOutletOn/aboveActive come from the reconstructed automation state
+  // (evaluateClimateStep), which only advances while automation is enabled
+  // (automation-rules.md §8) — while disabled it's frozen at whatever it
+  // last was (often never-triggered), so trusting it here can show IN RANGE
+  // for a reading that's actually past the threshold. Automation disabled
+  // (or unknown) falls back to a plain, unlatched comparison instead.
   let tone: CardTone = 'neutral';
   if (hasRange && value != null) {
-    if (isBelowActive(value, low, hysteresis, belowOutletOn)) tone = 'below';
-    else if (aboveActive) tone = 'above';
-    else tone = 'good';
+    if (automationEnabled) {
+      if (isBelowActive(value, low, hysteresis, belowOutletOn)) tone = 'below';
+      else if (aboveActive) tone = 'above';
+      else tone = 'good';
+    } else {
+      if (value < low) tone = 'below';
+      else if (value > high) tone = 'above';
+      else tone = 'good';
+    }
   }
 
   let badge: { className: string; label: string };
