@@ -283,7 +283,7 @@ function ReadingCard({
   } else if (tone === 'good') {
     badge = { className: GAUGE_COLORS.good.badgeClassName, label: 'IN RANGE' };
   } else if (!hasRange) {
-    badge = { className: GAUGE_COLORS.neutral.badgeClassName, label: automationEnabled === false ? 'AUTOMATION DISABLED' : 'NO TARGET' };
+    badge = { className: GAUGE_COLORS.neutral.badgeClassName, label: automationEnabled === false ? 'CLIMATE AUTOMATION DISABLED' : 'NO TARGET' };
   } else {
     badge = { className: GAUGE_COLORS.neutral.badgeClassName, label: 'NO DATA' };
   }
@@ -358,7 +358,7 @@ function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null
 // logic from scratch.
 function deriveTempStatus(state: ReconstructedState): { dotClassName: string; label: string } {
   if (state.automationEnabled === false) {
-    return { dotClassName: 'bg-device-disabled', label: 'AUTOMATION DISABLED' };
+    return { dotClassName: 'bg-device-disabled', label: 'CLIMATE AUTOMATION DISABLED' };
   }
   if (state.automationEnabled == null) {
     return { dotClassName: 'bg-device-disabled', label: 'AUTOMATION STATUS UNKNOWN' };
@@ -378,7 +378,7 @@ function deriveTempStatus(state: ReconstructedState): { dotClassName: string; la
 
 function deriveHumidityStatus(state: ReconstructedState): { dotClassName: string; label: string } {
   if (state.automationEnabled === false) {
-    return { dotClassName: 'bg-device-disabled', label: 'AUTOMATION DISABLED' };
+    return { dotClassName: 'bg-device-disabled', label: 'CLIMATE AUTOMATION DISABLED' };
   }
   if (state.automationEnabled == null) {
     return { dotClassName: 'bg-device-disabled', label: 'AUTOMATION STATUS UNKNOWN' };

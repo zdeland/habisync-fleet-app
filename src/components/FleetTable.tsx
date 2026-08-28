@@ -52,8 +52,8 @@ function deriveRangeBadge(
   // species-profile range, independent of whether automation is enabled —
   // a disabled device still has a real target (just no outlet acting on
   // it), so the number itself should still read as too-cold/too-hot/etc.
-  // The badge below it is the one that keeps announcing DISABLED/NO
-  // TARGET/NO DATA, since that's a different fact (is anything controlling
+  // The badge below it is the one that keeps announcing CLIMATE AUTOMATION
+  // DISABLED/NO TARGET/NO DATA, since that's a different fact (is anything controlling
   // this right now) from "where is the reading relative to target."
   let textClassName: string = GAUGE_COLORS.neutral.textClassName;
   if (hasRange && value != null) {
@@ -63,7 +63,7 @@ function deriveRangeBadge(
   }
 
   if (!enabled || !hasRange) {
-    return { className: GAUGE_COLORS.neutral.badgeClassName, textClassName, label: enabled ? 'NO TARGET' : 'DISABLED' };
+    return { className: GAUGE_COLORS.neutral.badgeClassName, textClassName, label: enabled ? 'NO TARGET' : 'CLIMATE AUTOMATION DISABLED' };
   }
   if (value == null) return { className: GAUGE_COLORS.neutral.badgeClassName, textClassName, label: 'NO DATA' };
   if (value < low!) return { className: lowColor.badgeClassName, textClassName, label: lowLabel };
