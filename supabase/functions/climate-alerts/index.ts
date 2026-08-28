@@ -16,7 +16,7 @@
 // "copied verbatim... re-copy whenever it changes" (docs/known-issues.md).
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
-import { createSmtpClient, sendEmail as sendSmtpEmail } from '../_shared/sendEmail.ts';
+import { sendEmail } from '../_shared/sendEmail.ts';
 import { detectSustainedCondition, outOfRange, SUSTAINED_OUT_OF_RANGE_MS, MAX_SAMPLE_GAP_MS } from '../_shared/climateDetection.ts';
 
 // Mirrors src/lib/queries.ts's STALE_AFTER_MS (HEARTBEAT_INTERVAL_MS * 2,
@@ -107,18 +107,12 @@ Deno.serve(async (req: Request) => {
   const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
   const appBaseUrl = Deno.env.get('APP_BASE_URL') ?? '';
 
-  const smtp = createSmtpClient();
-  async function sendEmail(to: string, subject: string, content: string) {
-    await sendSmtpEmail(smtp, to, subject, content);
-  }
-
-  try {
-    // 1. Who's favorited what, and who to email for each device.
-    const { data: favorites, error: favoritesError } = await supabase
-      .from('favorite_devices')
-      .select('device_id, user_id');
-    if (favoritesError) throw favoritesError;
-    if (!favorites || favorites.length === 0) return new Response('no favorites', { status: 200 });
+  // 1. Who's favorited what, and who to email for each device.
+  const { data: favorites, error: favoritesError } = await supabase
+    .from('favorite_devices')
+    .select('device_id, user_id');
+  if (favoritesError) throw favoritesError;
+  if (!favorites || favorites.length === 0) return new Response('no favorites', { status: 200 });
 
     const deviceIds = Array.from(new Set(favorites.map((f) => f.device_id)));
     const userIds = Array.from(new Set(favorites.map((f) => f.user_id)));
@@ -296,8 +290,5 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    return new Response('ok', { status: 200 });
-  } finally {
-    await smtp.close();
-  }
+  return new Response('ok', { status: 200 });
 });

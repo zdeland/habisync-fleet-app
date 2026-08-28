@@ -42,22 +42,32 @@ independent of any page view — a scheduled sweep, not a page read.
   out-of-range episode. Both functions share their SMTP connection setup via
   `supabase/functions/_shared/sendEmail.ts`.
 
-## Why an Edge Function has to talk to SMTP directly
+## Email transport: Postmark's HTTP API, not SMTP
 
-Supabase's Auth SMTP config (Dashboard → Auth → SMTP Settings) is wired
-*only* into Supabase Auth's own templated emails (magic link, invite,
-password reset — the same call this app already makes via
-`admin.auth.admin.inviteUserByEmail` in `src/app/invite/actions.ts`). There
-is no API that lets other code send an arbitrary custom email "through"
-that same configured SMTP connection, and Supabase doesn't expose those
-credentials for reading back out either.
+Two constraints pushed this to Postmark's HTTP API rather than SMTP:
 
-So the Edge Function opens its own SMTP connection directly (via
-`denomailer`, a Deno SMTP client), authenticating with the same
-host/port/username/password already entered into the Auth SMTP settings —
-re-entered as Edge Function secrets via `supabase secrets set`. The
-password ends up living in two places (Auth settings + Edge Function
-secret store); that's unavoidable given the platform, not a shortcut.
+1. Supabase's Auth SMTP config (Dashboard → Auth → SMTP Settings) is wired
+   *only* into Supabase Auth's own templated emails (magic link, invite,
+   password reset — the same call `src/app/invite/actions.ts` makes via
+   `admin.auth.admin.inviteUserByEmail`). There is no API to send an
+   arbitrary custom email "through" that configured connection, and the
+   credentials aren't readable back out — so the alert email had to be sent
+   by code holding its own copy of the provider credentials regardless.
+
+2. Supabase Edge Functions (Deno) can't reliably open outbound *SMTP*
+   connections. Confirmed against this project's own function logs while
+   building this: port 587's STARTTLS handshake trips a `denomailer` bug
+   (`invalid cmd`), and port 465's implicit-TLS connection just times out
+   (`os error 110` — the runtime blocks it). Raw SMTP from the edge runtime
+   is a dead end.
+
+HTTPS, on the other hand, works fine from Edge Functions — so
+`supabase/functions/_shared/sendEmail.ts` calls Postmark's REST API
+(`POST https://api.postmarkapp.com/email`) with a plain `fetch`. It
+authenticates with the **same Postmark Server API Token** that doubles as
+the SMTP username/password, so this still reuses the existing provider and
+credentials as intended; it's stored as the `POSTMARK_SERVER_TOKEN` Edge
+Function secret. No `denomailer`, no SMTP ports, no TLS-mode guessing.
 
 ## Detection: time-window based, not sample-count based
 

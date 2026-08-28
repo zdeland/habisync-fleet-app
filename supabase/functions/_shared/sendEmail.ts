@@ -1,34 +1,46 @@
-// Shared SMTP send helper for this repo's Edge Functions — Deno-only
-// (imports a Deno module, reads Deno.env), unlike climateDetection.ts in
-// this same _shared/ directory, which is kept dual-runtime importable.
-// Used by both supabase/functions/climate-alerts (the real sweep) and
-// supabase/functions/send-test-alert (the UI's "send me a test alert"
-// button) so the SMTP connection setup isn't duplicated between them.
+// Shared email helper for this repo's Edge Functions. Sends via Postmark's
+// HTTP API (plain HTTPS fetch), NOT raw SMTP.
 //
-// See docs/climate-alerts.md for why this talks to SMTP directly rather
-// than reusing Supabase Auth's SMTP config through some API — there isn't
-// one.
-import { SMTPClient } from 'https://deno.land/x/denomailer@1.6.0/mod.ts';
+// Why not SMTP: Supabase Edge Functions (Deno) can't reliably open outbound
+// SMTP connections — confirmed against this project's own function logs,
+// port 587's STARTTLS trips a denomailer bug ("invalid cmd") and port 465's
+// implicit TLS connection just times out (os error 110, blocked). HTTPS to
+// Postmark's REST API works cleanly and uses the SAME Postmark server token
+// already configured as the SMTP username/password, so it still reuses the
+// existing provider and credentials as intended — see docs/climate-alerts.md.
+//
+// Deno-only (reads Deno.env), unlike _shared/climateDetection.ts in this
+// same directory, which is kept dual Deno/Node importable for its unit test.
 
-export function createSmtpClient(): SMTPClient {
-  const port = Number(Deno.env.get('SMTP_PORT') ?? '587');
-  return new SMTPClient({
-    connection: {
-      hostname: Deno.env.get('SMTP_HOST')!,
-      port,
-      // denomailer's `tls: true` means *implicit* TLS from the first byte
-      // (the port-465 convention) — `tls: false` connects plaintext and
-      // then negotiates STARTTLS, which is what port 587 (Postmark's
-      // recommended port, and this app's default) actually expects.
-      // Setting tls: true unconditionally made every send silently fail
-      // the handshake on 587. 465 is the one port that genuinely wants
-      // implicit TLS; treat anything else as STARTTLS.
-      tls: port === 465,
-      auth: { username: Deno.env.get('SMTP_USER')!, password: Deno.env.get('SMTP_PASS')! },
+const POSTMARK_API = 'https://api.postmarkapp.com/email';
+
+// Sends one plaintext email. Throws on any non-2xx Postmark response (e.g.
+// an unconfirmed sender signature) so the caller can log/surface it rather
+// than silently swallowing a non-delivery.
+export async function sendEmail(to: string, subject: string, textBody: string): Promise<void> {
+  const token = Deno.env.get('POSTMARK_SERVER_TOKEN');
+  const from = Deno.env.get('SMTP_FROM');
+  if (!token) throw new Error('POSTMARK_SERVER_TOKEN is not set');
+  if (!from) throw new Error('SMTP_FROM is not set');
+
+  const response = await fetch(POSTMARK_API, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'X-Postmark-Server-Token': token,
     },
+    body: JSON.stringify({
+      From: from,
+      To: to,
+      Subject: subject,
+      TextBody: textBody,
+      MessageStream: 'outbound',
+    }),
   });
-}
 
-export async function sendEmail(client: SMTPClient, to: string, subject: string, content: string): Promise<void> {
-  await client.send({ from: Deno.env.get('SMTP_FROM')!, to, subject, content });
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`Postmark send failed (${response.status})${body ? `: ${body}` : ''}`);
+  }
 }

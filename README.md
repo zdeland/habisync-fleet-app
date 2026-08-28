@@ -61,7 +61,8 @@ runbook.
 
 | Name | Value |
 |---|---|
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | Same as Supabase Dashboard → Auth → SMTP Settings |
+| `POSTMARK_SERVER_TOKEN` | Your Postmark Server API Token (the same value Postmark uses as the SMTP username/password). Email is sent via Postmark's HTTP API, not SMTP — see `docs/climate-alerts.md` for why. |
+| `SMTP_FROM` | The verified Postmark sender address (e.g. `noreply@yourdomain.com`) — used as the email's `From`. |
 | `CRON_SHARED_SECRET` | A new random value — also pasted into `climate_alerts_cron.sql`'s `X-Cron-Secret` header when you run it |
 | `APP_BASE_URL` | e.g. `https://fleet.yourdomain.com` (used for the link in alert emails) |
 
