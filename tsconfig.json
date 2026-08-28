@@ -22,9 +22,16 @@
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
   // supabase/functions/**: Deno Edge Functions (globals like `Deno.*` and
   // bare/remote-URL imports aren't valid under this Next.js/Node project) —
-  // EXCEPT _shared/, which stays plain dependency-free TS reachable here so
-  // `tsx` (this repo's test runner) can still resolve
-  // test/climateDetection.test.ts's relative import into it; `exclude`
+  // EXCEPT _shared/climateDetection.ts, which stays plain dependency-free TS
+  // reachable here so `tsx` (this repo's test runner) can still resolve
+  // test/climateDetection.test.ts's relative import into it. sendEmail.ts is
+  // also under _shared/ but IS Deno-only (unlike climateDetection.ts), so
+  // it's excluded here same as the two functions that import it; `exclude`
   // below only affects the tsc project, not tsx's own module resolution.
-  "exclude": ["node_modules", "supabase/functions/climate-alerts"]
+  "exclude": [
+    "node_modules",
+    "supabase/functions/climate-alerts",
+    "supabase/functions/send-test-alert",
+    "supabase/functions/_shared/sendEmail.ts"
+  ]
 }

@@ -3,6 +3,7 @@ import Link from "next/link";
 import AutoRefresh from "@/components/AutoRefresh";
 import FleetOverview from "@/components/FleetOverview";
 import SignOutButton from "@/components/SignOutButton";
+import TestAlertButton from "@/components/TestAlertButton";
 import { requireUser } from "@/lib/supabase/auth";
 import { isSupabaseConfigured } from "@/lib/supabase/server";
 
@@ -36,6 +37,7 @@ export default async function HomePage() {
                   Invite
                 </Link>
               )}
+              {isSupabaseConfigured && <TestAlertButton />}
               {isSupabaseConfigured && <SignOutButton />}
             </div>
           </div>

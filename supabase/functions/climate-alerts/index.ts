@@ -16,7 +16,7 @@
 // "copied verbatim... re-copy whenever it changes" (docs/known-issues.md).
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
-import { SMTPClient } from 'https://deno.land/x/denomailer@1.6.0/mod.ts';
+import { createSmtpClient, sendEmail as sendSmtpEmail } from '../_shared/sendEmail.ts';
 import { detectSustainedCondition, outOfRange, SUSTAINED_OUT_OF_RANGE_MS, MAX_SAMPLE_GAP_MS } from '../_shared/climateDetection.ts';
 
 // Mirrors src/lib/queries.ts's STALE_AFTER_MS (HEARTBEAT_INTERVAL_MS * 2,
@@ -107,18 +107,9 @@ Deno.serve(async (req: Request) => {
   const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
   const appBaseUrl = Deno.env.get('APP_BASE_URL') ?? '';
 
-  const smtp = new SMTPClient({
-    connection: {
-      hostname: Deno.env.get('SMTP_HOST')!,
-      port: Number(Deno.env.get('SMTP_PORT') ?? '587'),
-      tls: true,
-      auth: { username: Deno.env.get('SMTP_USER')!, password: Deno.env.get('SMTP_PASS')! },
-    },
-  });
-  const smtpFrom = Deno.env.get('SMTP_FROM')!;
-
+  const smtp = createSmtpClient();
   async function sendEmail(to: string, subject: string, content: string) {
-    await smtp.send({ from: smtpFrom, to, subject, content });
+    await sendSmtpEmail(smtp, to, subject, content);
   }
 
   try {

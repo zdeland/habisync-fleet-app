@@ -32,6 +32,15 @@ independent of any page view — a scheduled sweep, not a page read.
 - **Favoriting UI**: the ★/☆ toggle in `src/components/FleetTable.tsx`,
   backed by `src/app/actions/favorites.ts`'s `toggleFavoriteDevice` Server
   Action and `src/lib/favorites.ts`'s `getFavoriteDeviceIds`.
+- **Manual test send**: the "Send test alert" button
+  (`src/components/TestAlertButton.tsx`, header of `src/app/page.tsx`) calls
+  a second Edge Function, `supabase/functions/send-test-alert`, which emails
+  the *calling user's own address* — verified via Supabase's normal JWT
+  check (`verify_jwt = true`, the opposite of `climate-alerts`' custom
+  secret check) rather than favorites/telemetry/the 3-minute window. Lets
+  anyone confirm the SMTP/Postmark setup works without waiting on a real
+  out-of-range episode. Both functions share their SMTP connection setup via
+  `supabase/functions/_shared/sendEmail.ts`.
 
 ## Why an Edge Function has to talk to SMTP directly
 

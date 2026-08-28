@@ -10,3 +10,10 @@ project_id = "habisync-fleet"
 # Supabase's own JWT verification, so the cron job doesn't need to embed the
 # real service-role JWT in its request headers.
 verify_jwt = false
+
+[functions.send-test-alert]
+# Opposite of climate-alerts: this one IS called by a real signed-in user
+# (the "Send test alert" button), so Supabase's normal JWT verification is
+# exactly what's wanted here (true is already the default; declared
+# explicitly for contrast with climate-alerts above).
+verify_jwt = true
