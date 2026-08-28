@@ -134,6 +134,39 @@ export type ProfileRow = {
   email: string | null;
 };
 
+// Webapp-owned per-user preference table — see supabase/favorite_devices.sql
+// and docs/climate-alerts.md. The first genuinely per-user-scoped table in
+// this app (RLS restricts rows to auth.uid() = user_id, unlike every other
+// table's shared-team `using (true)` policy).
+export type FavoriteDeviceRow = {
+  user_id: string;
+  device_id: string;
+  created_at: string;
+};
+
+export type ClimateAlertMetric = 'temp' | 'humidity';
+export type ClimateAlertStatus = 'open' | 'resolved';
+
+// Webapp-owned workflow table backing the favorite-device climate-alert
+// emails — see supabase/climate_alerts.sql and docs/climate-alerts.md.
+// Written only by the supabase/functions/climate-alerts Edge Function
+// (service-role); this app never writes it directly.
+export type ClimateAlertRow = {
+  id: number;
+  device_id: string;
+  metric: ClimateAlertMetric;
+  status: ClimateAlertStatus;
+  out_of_range_since: string;
+  observed_value: number;
+  low_threshold: number;
+  high_threshold: number;
+  detected_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+  opened_email_sent_at: string | null;
+  resolved_email_sent_at: string | null;
+};
+
 // devices/logs/telemetry: this app only ever reads these tables (writes come
 // from the on-device anon key, never the browser — see
 // docs/monitoring-webapp-plan.md §2), so Insert/Update are placeholders to
@@ -158,6 +191,21 @@ export type Database = {
         Relationships: [];
       };
       profiles: { Row: ProfileRow; Insert: Partial<ProfileRow>; Update: Partial<ProfileRow>; Relationships: [] };
+      favorite_devices: {
+        Row: FavoriteDeviceRow;
+        Insert: Partial<FavoriteDeviceRow>;
+        Update: Partial<FavoriteDeviceRow>;
+        Relationships: [];
+      };
+      // Read-only from this app's perspective (see comment on ClimateAlertRow
+      // above) — Insert/Update are still declared as placeholders to satisfy
+      // postgrest-js's generic shape, same convention as devices/logs/telemetry.
+      climate_alerts: {
+        Row: ClimateAlertRow;
+        Insert: Partial<ClimateAlertRow>;
+        Update: Partial<ClimateAlertRow>;
+        Relationships: [];
+      };
     };
     Views: { [_ in never]: never };
     Functions: { [_ in never]: never };

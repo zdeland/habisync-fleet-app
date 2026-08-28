@@ -1,5 +1,6 @@
 import { createClient, isSupabaseConfigured } from '@/lib/supabase/server';
 import { getFleetHealth } from '@/lib/queries';
+import { getFavoriteDeviceIds } from '@/lib/favorites';
 import FleetTable from '@/components/FleetTable';
 
 export default async function FleetOverview() {
@@ -12,7 +13,9 @@ export default async function FleetOverview() {
   }
 
   const supabase = createClient();
-  const fleet = supabase ? await getFleetHealth(supabase) : [];
+  const [fleet, favoriteDeviceIds] = supabase
+    ? await Promise.all([getFleetHealth(supabase), getFavoriteDeviceIds(supabase)])
+    : [[], new Set<string>()];
 
   return (
     <section className="rounded-2xl bg-device-card p-6 shadow-device">
@@ -29,7 +32,7 @@ export default async function FleetOverview() {
       {fleet.length === 0 ? (
         <div className="rounded-xl bg-device-surface p-8 text-sm text-device-text-secondary">No devices reporting yet.</div>
       ) : (
-        <FleetTable fleet={fleet} />
+        <FleetTable fleet={fleet} favoriteDeviceIds={favoriteDeviceIds} />
       )}
     </section>
   );

@@ -1,11 +1,13 @@
 'use client';
 
+import { useState, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { CRITICAL_ERROR_COUNT, WARNING_ERROR_COUNT, type DeviceHealth } from '@/lib/queries';
 import { celsiusToFahrenheit, tempRangeC } from '@/lib/units';
 import { GAUGE_COLORS } from '@/lib/gaugeColors';
 import { compareFwVersions } from '@/lib/version';
+import { toggleFavoriteDevice } from '@/app/actions/favorites';
 import type { TelemetryRow, ProfileConfig, OutletAlertRow } from '@/lib/types';
 
 // Mirrors the on-device "status check" component (dot + mono one-liner),
@@ -125,6 +127,42 @@ function formatLastSeen(lastSeen: string, isStale: boolean): string {
   return isStale ? `${label} (stale)` : label;
 }
 
+// Star toggle for favorite_devices (docs/climate-alerts.md) — favoriting a
+// device is what makes it eligible for the out-of-range email alerts.
+// Optimistic local state + useTransition so the star flips instantly
+// instead of waiting on the Server Action round-trip; falls back to the
+// last-known prop value if the action throws.
+function FavoriteToggle({ deviceId, isFavorite }: { deviceId: string; isFavorite: boolean }) {
+  const [optimistic, setOptimistic] = useState(isFavorite);
+  const [isPending, startTransition] = useTransition();
+
+  return (
+    <button
+      type="button"
+      aria-label={optimistic ? 'Unfavorite device' : 'Favorite device'}
+      aria-pressed={optimistic}
+      disabled={isPending}
+      onClick={(event) => {
+        event.stopPropagation();
+        const next = !optimistic;
+        setOptimistic(next);
+        startTransition(async () => {
+          try {
+            await toggleFavoriteDevice(deviceId, next);
+          } catch {
+            setOptimistic(!next); // revert on failure
+          }
+        });
+      }}
+      className={`text-lg leading-none transition hover:text-device-heating disabled:opacity-50 ${
+        optimistic ? 'text-device-heating' : 'text-device-text-tertiary'
+      }`}
+    >
+      {optimistic ? '★' : '☆'}
+    </button>
+  );
+}
+
 // A separate column, not a Status badge — see docs/outlet-alerts.md: these
 // are human-managed workflow items (open until someone closes/escalates
 // them via the device page) that can themselves be stale, not a live
@@ -156,13 +194,24 @@ function AttentionCell({ alerts, href }: { alerts: OutletAlertRow[]; href: strin
 // Shared thead + tbody markup for both the active table and the collapsed
 // offline one below it — kept as one component so the two sections can't
 // drift out of sync on columns.
-function DeviceRows({ fleet, latestFwVersion }: { fleet: DeviceHealth[]; latestFwVersion: string | null }) {
+function DeviceRows({
+  fleet,
+  latestFwVersion,
+  favoriteDeviceIds,
+}: {
+  fleet: DeviceHealth[];
+  latestFwVersion: string | null;
+  favoriteDeviceIds: Set<string>;
+}) {
   const router = useRouter();
 
   return (
     <table className="min-w-full divide-y divide-white/10 text-left text-sm">
       <thead className="bg-device-surface text-device-text-secondary">
         <tr>
+          <th className="px-4 py-3 font-medium">
+            <span className="sr-only">Favorite</span>
+          </th>
           <th className="px-4 py-3 font-medium">Device</th>
           <th className="px-4 py-3 font-medium">Temp</th>
           <th className="px-4 py-3 font-medium">Humidity</th>
@@ -188,6 +237,9 @@ function DeviceRows({ fleet, latestFwVersion }: { fleet: DeviceHealth[]; latestF
               onClick={() => router.push(href)}
               className="cursor-pointer transition hover:bg-device-surface-hover"
             >
+              <td className="px-4 py-3">
+                <FavoriteToggle deviceId={entry.device.device_id} isFavorite={favoriteDeviceIds.has(entry.device.device_id)} />
+              </td>
               <td className="px-4 py-3">
                 <Link
                   href={href}
@@ -232,7 +284,13 @@ function DeviceRows({ fleet, latestFwVersion }: { fleet: DeviceHealth[]; latestF
   );
 }
 
-export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
+export default function FleetTable({
+  fleet,
+  favoriteDeviceIds,
+}: {
+  fleet: DeviceHealth[];
+  favoriteDeviceIds: Set<string>;
+}) {
   // "Latest" here means the newest version reported anywhere in this fleet
   // right now — there's no external firmware release feed this read-only
   // app can check against, only what devices have actually reported.
@@ -252,7 +310,7 @@ export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
     <div className="flex flex-col gap-4">
       {activeFleet.length > 0 && (
         <div className="overflow-hidden rounded-xl">
-          <DeviceRows fleet={activeFleet} latestFwVersion={latestFwVersion} />
+          <DeviceRows fleet={activeFleet} latestFwVersion={latestFwVersion} favoriteDeviceIds={favoriteDeviceIds} />
         </div>
       )}
       {offlineFleet.length > 0 && (
@@ -267,7 +325,7 @@ export default function FleetTable({ fleet }: { fleet: DeviceHealth[] }) {
             <span className="text-device-text-tertiary transition group-open:rotate-180">▾</span>
           </summary>
           <div className="overflow-hidden rounded-xl">
-            <DeviceRows fleet={offlineFleet} latestFwVersion={latestFwVersion} />
+            <DeviceRows fleet={offlineFleet} latestFwVersion={latestFwVersion} favoriteDeviceIds={favoriteDeviceIds} />
           </div>
         </details>
       )}

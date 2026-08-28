@@ -1,0 +1,12 @@
+# First Supabase CLI config in this repo — added for the climate-alerts
+# Edge Function (docs/climate-alerts.md). Only [functions.*] is relevant
+# here; this repo has no local Supabase stack (db/studio/etc. sections use
+# the CLI's own defaults and aren't otherwise used against this project).
+project_id = "habisync-fleet"
+
+[functions.climate-alerts]
+# The function URL is otherwise public — auth is a hand-checked
+# X-Cron-Secret header inside the function body (see index.ts) instead of
+# Supabase's own JWT verification, so the cron job doesn't need to embed the
+# real service-role JWT in its request headers.
+verify_jwt = false
