@@ -46,8 +46,10 @@ runbook.
 
 **One-time setup:**
 
-1. Run `supabase/favorite_devices.sql` then `supabase/climate_alerts.sql`
-   in the Supabase SQL editor.
+1. Run `supabase/favorite_devices.sql`, `supabase/climate_alerts.sql`,
+   `supabase/climate_alert_notifications.sql`, and
+   `supabase/grant_service_role_climate_alerts.sql` in the Supabase SQL
+   editor.
 2. `supabase login`, then `supabase link --project-ref <ref>`.
 3. `supabase functions deploy climate-alerts`.
 4. Set secrets (values below) with `supabase secrets set KEY=value ...`.

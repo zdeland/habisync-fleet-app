@@ -26,9 +26,11 @@ independent of any page view — a scheduled sweep, not a page read.
   exact same file is imported by the Edge Function (Deno) and by
   `test/climateDetection.test.ts` (Node, via this repo's existing
   `tsx --test` runner).
-- **Data model**: `supabase/favorite_devices.sql` (who favorited what) and
+- **Data model**: `supabase/favorite_devices.sql` (who favorited what),
   `supabase/climate_alerts.sql` (the open/resolved alert lifecycle, mirrors
-  `outlet_alerts.sql`'s shape).
+  `outlet_alerts.sql`'s shape), and
+  `supabase/climate_alert_notifications.sql` (the per-recipient "who's been
+  emailed" ledger).
 - **Favoriting UI**: the ★/☆ toggle in `src/components/FleetTable.tsx`,
   backed by `src/app/actions/favorites.ts`'s `toggleFavoriteDevice` Server
   Action and `src/lib/favorites.ts`'s `getFavoriteDeviceIds`.
@@ -110,19 +112,27 @@ math runs.
 
 ## Reconciliation model (mirrors `src/lib/alerts.ts`'s `syncOutletAlerts`)
 
+De-dup is tracked **per recipient**, in `climate_alert_notifications`
+(`supabase/climate_alert_notifications.sql`) — one row per
+`(alert_id, user_id, kind)`, where `kind` is `opened` or `resolved`. The
+presence of a row *is* the "already emailed" fact. This is what lets a user
+who favorites a device mid-alert get caught up on their next sweep, instead
+of being permanently skipped by a single per-alert-row flag.
+
 Per `(device_id, metric)`, each sweep:
-- No open row + sustained violation → insert `status: 'open'`, email every
-  current favoriter individually (not one CC'd message), record
-  `opened_email_sent_at` on success.
-- Open row but the send previously failed (`opened_email_sent_at` still
-  null) → retry the send without inserting a duplicate row (the partial
-  unique index on `(device_id, metric) where status = 'open'` already
-  prevents that).
-- Open row + still violating → no resend; already notified.
-- Open row + latest reading back in range → resolve, email the "back in
-  range" notice, mark `status: 'resolved'`. Non-sticky: a later fresh
-  episode opens a brand-new row, same spirit as `outlet_alerts`'
-  `auto_resolved`.
+- No open row + sustained violation → insert `status: 'open'` (the partial
+  unique index on `(device_id, metric) where status = 'open'` keeps it to
+  one active row), then email every current favoriter individually (not one
+  CC'd message) and write an `opened` ledger row for each.
+- Open row + still violating → email any current favoriter **without** an
+  `opened` ledger row (a new mid-alert favoriter, or a retry of an earlier
+  failed send — a failed send writes no ledger row, so it's retried next
+  sweep). Favoriters already notified are skipped.
+- Open row + latest reading back in range → mark `status: 'resolved'` and
+  email the "back in range" notice to exactly the users who have an `opened`
+  row for this alert and are still favoriting it (writing a `resolved`
+  ledger row each). Non-sticky: a later fresh episode opens a brand-new row,
+  same spirit as `outlet_alerts`' `auto_resolved`.
 
 Thresholds are re-resolved fresh from the device's *current*
 `profile_config` every sweep — the `low_threshold`/`high_threshold` columns
@@ -157,6 +167,14 @@ Edge Function's per-metric block and the email copy change.
   doesn't block other favoriters of the same device.
 - **Multiple favoriters**: each gets their own individually-addressed
   email, never one shared CC.
+- **Favoriting mid-open-alert**: the new favoriter *is* caught up — on their
+  next sweep they get the "out of range" email for the currently-open alert
+  (they have no `opened` ledger row yet), and later the "back in range"
+  email when it resolves. A user who favorites *after* an alert resolves
+  gets nothing for that past episode, only future ones.
+- **Unfavoriting mid-alert**: no resolve email — the resolve step only
+  emails users who are *still* favoriting the device (and were opened). They
+  already got the "out of range" email; opting out stops the follow-up.
 - **Automation disabled**: alerts still fire. A disabled profile is not
   skipped — it still has a real target range and nothing correcting the
   drift, which is arguably exactly when a favoriter wants to know.

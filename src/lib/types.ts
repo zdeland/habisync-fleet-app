@@ -163,8 +163,17 @@ export type ClimateAlertRow = {
   detected_at: string;
   updated_at: string;
   resolved_at: string | null;
-  opened_email_sent_at: string | null;
-  resolved_email_sent_at: string | null;
+};
+
+// Per-recipient notification ledger for climate_alerts — see
+// supabase/climate_alert_notifications.sql and docs/climate-alerts.md.
+// Written only by the climate-alerts Edge Function (service-role).
+export type ClimateAlertNotificationKind = 'opened' | 'resolved';
+export type ClimateAlertNotificationRow = {
+  alert_id: number;
+  user_id: string;
+  kind: ClimateAlertNotificationKind;
+  sent_at: string;
 };
 
 // devices/logs/telemetry: this app only ever reads these tables (writes come
@@ -204,6 +213,12 @@ export type Database = {
         Row: ClimateAlertRow;
         Insert: Partial<ClimateAlertRow>;
         Update: Partial<ClimateAlertRow>;
+        Relationships: [];
+      };
+      climate_alert_notifications: {
+        Row: ClimateAlertNotificationRow;
+        Insert: Partial<ClimateAlertNotificationRow>;
+        Update: Partial<ClimateAlertNotificationRow>;
         Relationships: [];
       };
     };

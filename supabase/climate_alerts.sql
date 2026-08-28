@@ -37,15 +37,10 @@ create table public.climate_alerts (
 
   detected_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  resolved_at timestamptz,
-
-  -- Rate-limiting: an email is sent exactly once per state transition, on
-  -- the sweep that first observes it. If the send fails (SMTP down), this
-  -- column stays null so the *next* sweep retries the send without
-  -- inserting a duplicate row (the partial unique index below already
-  -- guarantees that).
-  opened_email_sent_at timestamptz,
-  resolved_email_sent_at timestamptz
+  resolved_at timestamptz
+  -- Who has been emailed (and retry-on-failure de-dup) is tracked
+  -- per-recipient in climate_alert_notifications, not with columns here —
+  -- see that file and docs/climate-alerts.md.
 );
 
 -- At most one active alert per (device, metric) — the Edge Function upserts
