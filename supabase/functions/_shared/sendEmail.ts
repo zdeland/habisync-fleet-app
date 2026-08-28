@@ -11,11 +11,19 @@
 import { SMTPClient } from 'https://deno.land/x/denomailer@1.6.0/mod.ts';
 
 export function createSmtpClient(): SMTPClient {
+  const port = Number(Deno.env.get('SMTP_PORT') ?? '587');
   return new SMTPClient({
     connection: {
       hostname: Deno.env.get('SMTP_HOST')!,
-      port: Number(Deno.env.get('SMTP_PORT') ?? '587'),
-      tls: true,
+      port,
+      // denomailer's `tls: true` means *implicit* TLS from the first byte
+      // (the port-465 convention) — `tls: false` connects plaintext and
+      // then negotiates STARTTLS, which is what port 587 (Postmark's
+      // recommended port, and this app's default) actually expects.
+      // Setting tls: true unconditionally made every send silently fail
+      // the handshake on 587. 465 is the one port that genuinely wants
+      // implicit TLS; treat anything else as STARTTLS.
+      tls: port === 465,
       auth: { username: Deno.env.get('SMTP_USER')!, password: Deno.env.get('SMTP_PASS')! },
     },
   });
