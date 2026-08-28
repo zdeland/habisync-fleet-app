@@ -25,6 +25,10 @@ create table public.favorite_devices (
 -- RLS policies alone are not enough without a base table-level GRANT first.
 grant select, insert, delete on public.favorite_devices to authenticated;
 
+-- The climate-alerts Edge Function reads this as `service_role` (which this
+-- project does not auto-grant — see grant_service_role_climate_alerts.sql).
+grant select on public.favorite_devices to service_role;
+
 alter table public.favorite_devices enable row level security;
 
 create policy "users read own favorites"

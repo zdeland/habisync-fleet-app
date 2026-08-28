@@ -57,6 +57,11 @@ create unique index climate_alerts_active_unique
 
 grant select on public.climate_alerts to authenticated;
 
+-- The climate-alerts Edge Function writes this as `service_role` (which this
+-- project does not auto-grant — see grant_service_role_climate_alerts.sql,
+-- which also grants the firmware-owned devices/telemetry tables it reads).
+grant select, insert, update on public.climate_alerts to service_role;
+
 alter table public.climate_alerts enable row level security;
 
 -- Same shared-team read model as outlet_alerts — only the Edge Function
