@@ -24,3 +24,6 @@ npm-debug.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# supabase CLI (project link cache — local machine state, not repo config)
+/supabase/.temp/
