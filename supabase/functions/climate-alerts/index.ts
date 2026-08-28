@@ -162,10 +162,13 @@ Deno.serve(async (req: Request) => {
       // Skip stale devices entirely — see STALE_AFTER_MS comment above.
       if (now - new Date(device.last_seen).getTime() > STALE_AFTER_MS) continue;
 
-      // Skip devices with automation disabled — an intentionally-disabled
-      // target isn't an alarming reading (mirrors the same reasoning in
-      // src/components/DeviceTimeline.tsx's ReadingCard).
-      if (device.profile_config?.enabled === false) continue;
+      // NOTE: we deliberately do NOT skip devices whose profile is disabled.
+      // A disabled profile still has a real target range, and nothing is
+      // actively correcting the drift — arguably exactly when a favoriter
+      // wants to know. Consistent with the device page (DeviceTimeline.tsx's
+      // ReadingCard / the fleet table), which colorizes out-of-range
+      // readings even when automation is off. Only a genuinely absent target
+      // range (metric.rangeOf === null, below) exempts a metric.
 
       const { data: telemetryRows, error: telemetryError } = await supabase
         .from('telemetry')

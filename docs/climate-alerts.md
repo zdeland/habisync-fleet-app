@@ -157,6 +157,12 @@ Edge Function's per-metric block and the email copy change.
   doesn't block other favoriters of the same device.
 - **Multiple favoriters**: each gets their own individually-addressed
   email, never one shared CC.
+- **Automation disabled**: alerts still fire. A disabled profile is not
+  skipped — it still has a real target range and nothing correcting the
+  drift, which is arguably exactly when a favoriter wants to know.
+  Consistent with the device page / fleet table, which colorize
+  out-of-range readings even when automation is off. Only a genuinely
+  absent target range exempts a metric.
 - **Favoriting mid-open-alert**: no email until that alert resolves and a
   fresh one opens later — `opened_email_sent_at` is alert-row-scoped, not
   per-recipient. Accepted simplification; a per-recipient notification
