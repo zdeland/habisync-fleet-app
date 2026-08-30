@@ -158,7 +158,7 @@ export type OutletAttention = OutletMismatch & {
 
 // Deep enough to usually find where a persistent mismatch actually started,
 // without an unbounded per-device scan (~8h of history at the 60s telemetry
-// cadence from docs/automation-rules.md §9).
+// cadence from docs/automation-rules.md §10).
 const ATTENTION_TELEMETRY_LOOKBACK = 500;
 const ATTENTION_EVENT_LOOKBACK = 200;
 

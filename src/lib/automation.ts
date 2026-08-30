@@ -4,11 +4,16 @@
 // the same fixture the firmware repo tests its own C++ against
 // (test/fixtures/climate_vectors.json — see test/automation.test.ts).
 //
-// Day Light/UVB (automation-rules.md §6-7) are NOT implemented here yet —
-// they need the device's resolved local time, which depends on the
-// NAMED_TIMEZONES label list (src/main.cpp:154-163 in the firmware repo,
-// not available here) and there's no fixture covering them. Don't guess at
-// the timezone resolution; get that list before implementing §6-7.
+// The scheduled lights — Day Light/UVB/Basking Spot (automation-rules.md
+// §6-8) — are NOT implemented here yet: they need the device's resolved
+// local time, which depends on the NAMED_TIMEZONES label list
+// (src/main.cpp:154-163 in the firmware repo, not available here) and
+// climate_vectors.json covers Heater/Mister/Fan only, so there'd be no
+// fixture pinning them. Don't guess at the timezone resolution; get that
+// list before implementing §6-8. When they do land, read the windows via
+// src/lib/schedule.ts's lightWindows() and OR in_window across all of
+// them — testing only the first window is the §6 trap that produces
+// confident-looking false anomalies.
 
 export const TEMP_HYSTERESIS_C = 1.0;
 export const HUMIDITY_HYSTERESIS_PCT = 3.0;
@@ -44,7 +49,7 @@ export type ClimateDecision = {
   tooHumid: boolean; // = humTrigger
 };
 
-// automation-rules.md §8: when disabled, evaluate() doesn't run at all —
+// automation-rules.md §9: when disabled, evaluate() doesn't run at all —
 // outlets are whatever a human last set, and the previous computed state
 // isn't advanced. Call this every step regardless of `enabled`; it handles
 // the gate itself so callers don't have to remember to skip disabled ones.

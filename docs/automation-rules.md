@@ -14,8 +14,11 @@ every device — cross-check `devices.fw_version` before trusting a
 mismatch as a bug; older firmware may not implement a rule described here.
 
 Implemented in this repo as `src/lib/automation.ts` (Heater/Mister/Fan
-only so far — see that file for why Day Light/UVB aren't implemented yet),
-tested against `test/fixtures/climate_vectors.json` in `test/automation.test.ts`.
+only so far — see that file for why the lighting rules aren't implemented
+yet), tested against `test/fixtures/climate_vectors.json` in
+`test/automation.test.ts`. The lighting schedule's *shape* is already read
+by `src/lib/schedule.ts`, which is the only place that should touch the
+`*_ranges`/scalar fields directly (§6).
 
 ## 1. Inputs
 
@@ -28,13 +31,18 @@ Per device, per instant:
   `devices.fw_version` before assuming which one a given row uses.
 - **`devices.profile_config`** (or the historized `logs.tag='config'` row
   in effect at that instant, per the webapp plan §3) — `enabled`,
-  `temp_low_c`, `temp_high_c`, `hum_low`, `hum_high`, `day_light_on`,
-  `day_light_off`, `uvb_on`, `uvb_off`, `timezone`. Same firmware-version
-  caveat — older snapshots carry `temp_low_f`/`temp_high_f` instead.
+  `temp_low_c`, `temp_high_c`, `hum_low`, `hum_high`, `day_light_ranges`,
+  `uvb_ranges`, `basking_ranges`, `timezone`. Same firmware-version caveat
+  in both directions — older snapshots carry `temp_low_f`/`temp_high_f`
+  instead of the Celsius pair, and carry the single-window scalars
+  (`day_light_on`/`day_light_off`, `uvb_on`/`uvb_off`) instead of the
+  `*_ranges` arrays. The scalars still ship on 0.25.0+ but no longer tell
+  the whole story — read them only as described in §6.
 - **`devices.outlet_roles`** (or the matching historized `logs` row) — a
   jsonb array, position *i* = outlet *i*'s role label. Match against the
   literal strings `"Heater"`, `"Mister"`, `"Fan"`, `"Day Light"`,
-  `"UVB Light"` (exact spelling from `outletRoleLabel()`) — any other
+  `"UVB Light"`, `"Basking Spot"` (exact spelling from
+  `outletRoleLabel()`; the last is firmware 0.25.0+) — any other
   string is an unassigned/generic outlet with no automation rule. A role
   absent from the array means that behavior is inactive entirely on that
   device; don't expect any corresponding `outlet_mask` bit to move.
@@ -131,14 +139,59 @@ recomputed `fan` boolean says.
 
 Outlet role: `"Day Light"`. Only evaluated while
 `profile_config.enabled == true` **and** the device's clock has completed
-NTP sync (see §8 — there's no direct signal for this in shipped data).
+NTP sync (see §9 — there's no direct signal for this in shipped data).
 Given those hold:
 
 ```
-day_light = in_window(now_local, day_light_on, day_light_off)
+day_light = ANY(in_window(now_local, r.on, r.off) for r in day_light_ranges)
 ```
 
-`in_window` handles a window crossing midnight:
+Firmware 0.25.0 replaced the single `day_light_on`/`day_light_off` pair
+with **up to three independent windows per day**, and did the same for UVB
+(§7) and the new Basking Spot (§8). The light is on if `now_local` falls
+in *any* window:
+
+```
+"day_light_ranges": [{"on": "07:00", "off": "19:00"}],
+"uvb_ranges":       [{"on": "08:00", "off": "11:00"},
+                     {"on": "15:00", "off": "18:00"}],
+"basking_ranges":   []
+```
+
+Reading the arrays correctly:
+
+- **Unused windows are omitted, not null-padded** — an array holds 0–3
+  elements.
+- **An empty array is valid and means "never scheduled on"** — not missing
+  data, and *not* a signal to fall back to the scalars.
+- Windows are **not normalized**: they may overlap, and they are not
+  sorted. Don't assume a disjoint, ordered set.
+- **The old scalar fields still ship, plus new `basking_on`/`basking_off`
+  — but every one of them carries only the first window.**
+  `day_light_on`/`day_light_off` = `day_light_ranges[0]`, or
+  `"00:00"`/`"00:00"` if that array is empty; same for `uvb_*` and
+  `basking_*`.
+- **Fall back to the scalar pair only when the `*_ranges` key is absent**
+  (a pre-0.25.0 device). Feature-detect on key presence rather than
+  parsing `devices.fw_version`. On a `devices` row the two can't actually
+  disagree — `fw_version` and `profile_config` ship in the same heartbeat
+  upsert — but historized `logs.tag='config'` rows are append-only and
+  keep the shape they were written under, so version-gating a *historical*
+  check against the device's *current* version reads the wrong branch for
+  every row predating that device's upgrade (§11 on resolving against the
+  snapshot in effect at the instant being judged).
+- The `"00:00"`/`"00:00"` case is self-consistent (equal on/off means
+  never on, per `in_window` below) but is **not** a real midnight window —
+  don't special-case midnight into existence.
+
+A validator that keeps reading only the scalars computes "should be off"
+for the entire duration of any second or third window, and flags a
+sustained mismatch against `outlet_mask` — i.e. it reports a confident
+firmware bug that isn't one. That failure mode looks plausible enough to
+survive review, which makes it worse than a crash.
+
+`in_window` is unchanged and applies per window. It handles a window
+crossing midnight:
 
 ```
 if on_time == off_time: return false
@@ -151,15 +204,15 @@ else:                   return now >= on_time OR now < off_time   // wraps past 
 
 ## 7. UVB Light
 
-Outlet role: `"UVB Light"`. Same time window as Day Light
-(`uvb_on`/`uvb_off`, independently configurable), **plus** a forced-off
+Outlet role: `"UVB Light"`. Same windows as Day Light (`uvb_ranges`,
+independently configurable, read exactly as in §6), **plus** a forced-off
 safety override layered on top: UVB bulbs are themselves a heat source, so
 UVB is suppressed whenever the Fan's temperature trigger (§5) is active,
 *regardless of the time window*:
 
 ```
-uvb_window = in_window(now_local, uvb_on, uvb_off)
-uvb = uvb_window AND NOT temp_trigger
+uvb_window = ANY(in_window(now_local, r.on, r.off) for r in uvb_ranges)
+uvb        = uvb_window AND NOT temp_trigger
 ```
 
 Day Light is **not** subject to this override (assumed low-heat, e.g. LED)
@@ -168,24 +221,49 @@ hot, that's a per-installation firmware customization, not default
 behavior — check `fw_version`/notes before assuming this rule applies
 identically everywhere.
 
-## 8. What `enabled` does and doesn't cover
+## 8. Basking Spot
 
-`profile_config.enabled == false` means **all five roles above go fully
-manual** — Heater/Mister/Fan/Day Light/UVB state is whatever a human last
-set via the dashboard, and none of the formulas above apply. Don't flag a
-mismatch during a disabled window; any state is "correct" by definition.
+Outlet role: `"Basking Spot"` (firmware 0.25.0+). Its own windows
+(`basking_ranges`, read exactly as in §6), under the **same** forced-off
+heat override as UVB (§7) — a basking lamp is unambiguously a heat source:
 
-**Known blind spot:** even with `enabled == true`, Day Light/UVB fall back
+```
+basking_window = ANY(in_window(now_local, r.on, r.off) for r in basking_ranges)
+basking        = basking_window AND NOT temp_trigger
+```
+
+Two things to get right:
+
+- Reuse the **UVB** override path, not Day Light's unguarded one.
+- It is **deliberately not coupled to the Heater's thermostat** (§3). It
+  runs purely on its clock windows plus that safety ceiling — don't expect
+  its state to track `temp_low_c`/`temp_high_c` in either direction, and
+  don't infer a relationship from the two often being on together.
+
+Nothing about `outlet_mask` changes structurally: Basking Spot is just
+another outlet index, and unassigned means no bit moves, same as any other
+absent role. Pre-0.25.0 devices never carry `"Basking Spot"` in
+`outlet_roles` and have no `basking_*` fields at all.
+
+## 9. What `enabled` does and doesn't cover
+
+`profile_config.enabled == false` means **all six roles above go fully
+manual** — Heater/Mister/Fan/Day Light/UVB/Basking Spot state is whatever a
+human last set via the dashboard, and none of the formulas above apply.
+Don't flag a mismatch during a disabled window; any state is "correct" by
+definition.
+
+**Known blind spot:** even with `enabled == true`, the scheduled lights fall back
 to a manual `nightMode` toggle (not the schedule) whenever the device's
 clock hasn't completed NTP sync yet — e.g. shortly after boot, or no
 internet access. Nothing in `profile_config` or the heartbeat directly says
 "clock synced: yes/no" today. Best available proxy: a very recent
 `first_seen`/small `uptime_ms` on `devices`, or `logs.device_time` being
 null on rows around that time (populated only once NTP has synced) —
-treat a Day Light/UVB mismatch as lower-confidence, not a confirmed bug, in
-the minutes right after a boot event.
+treat a Day Light/UVB/Basking Spot mismatch as lower-confidence, not a
+confirmed bug, in the minutes right after a boot event.
 
-## 9. Cadence — bounds on "how stale is stale"
+## 10. Cadence — bounds on "how stale is stale"
 
 The on-device loop doesn't recompute continuously; use these to judge
 whether an apparent mismatch is just normal lag vs. a real bug:
@@ -194,7 +272,7 @@ whether an apparent mismatch is just normal lag vs. a real bug:
 |---|---|
 | Sensor read (updates live temp/hum) | 2s |
 | Heater/Mister/Fan re-evaluation | 30s |
-| Day Light/UVB schedule re-check | 15s |
+| Day Light/UVB/Basking schedule re-check | 15s |
 | Telemetry sample shipped | 60s |
 | Heartbeat (`devices` upsert, `profile_config` snapshot) | 5 min |
 
@@ -203,7 +281,7 @@ one telemetry sample (≤60s) is expected noise from this cadence gap, not
 necessarily an anomaly — only flag a mismatch that **persists across
 multiple consecutive telemetry samples**.
 
-## 10. Anomaly conditions worth flagging
+## 11. Anomaly conditions worth flagging
 
 **First, exclude test-driven rows.** The dashboard's "Test Automation" page
 runs a fake reading through the real decision logic and outlet control —
@@ -218,15 +296,16 @@ config says it should":
 
 - Recomputed decision for a role disagrees with its `outlet_mask` bit for
   several consecutive telemetry samples (not just one), while
-  `enabled == true` and (for Day Light/UVB) the device is well past its
-  last boot.
+  `enabled == true` and (for the scheduled lights) the device is well past
+  its last boot.
 - Fan `outlet_mask` bit is ON while both recomputed `temp_trigger` and
   `hum_trigger` are OFF (or vice versa) for a sustained stretch — flags
   either a stuck relay/Kasa outlet, or the device running firmware whose
   fan logic has diverged from this spec.
-- UVB `outlet_mask` bit is ON while the recomputed `temp_trigger` is
-  active — the forced-off override isn't taking effect (possible bug or
-  pre-override firmware version).
+- UVB or Basking Spot `outlet_mask` bit is ON while the recomputed
+  `temp_trigger` is active — the forced-off override isn't taking effect
+  (possible bug or pre-override firmware version). The check is identical
+  for both roles; both are suppressed by the same signal (§7, §8).
 - A profile/threshold implies an outlet role that has no matching entry in
   `outlet_roles` at all — automation is silently a no-op for that role;
   worth surfacing as a configuration gap, not a live-state anomaly.

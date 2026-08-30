@@ -20,6 +20,15 @@ export type LogTag =
   | 'cloudlog'
   | 'config';
 
+// One scheduled on/off window for a light, as it appears inside
+// profile_config's `*_ranges` arrays (firmware 0.25.0+). Times are "HH:MM"
+// in the device's local timezone; on == off means "never on", and a window
+// may wrap past midnight (docs/automation-rules.md §6).
+export type LightWindow = {
+  on: string;
+  off: string;
+};
+
 // Firmware 0.5.0 switched the wire format from Fahrenheit to Celsius
 // (temp_low_f/temp_high_f -> temp_low_c/temp_high_c — see
 // docs/known-issues.md). profile_config is a JSONB blob that only gets
@@ -28,6 +37,15 @@ export type LogTag =
 // underlying logs/telemetry table columns have all been renamed+converted.
 // Both shapes are optional here on purpose — read via src/lib/units.ts's
 // tempRangeC(), never these fields directly.
+//
+// Firmware 0.25.0 did the same thing to the lighting schedule: each light
+// went from one on/off pair to up to three independent windows, and a sixth
+// role (Basking Spot) joined. The scalar pairs still ship, but they now
+// carry *only the first window* — reading them alone silently loses every
+// later window, so read via src/lib/schedule.ts's lightWindows(), never
+// these fields directly. Both the arrays and basking_on/basking_off are
+// optional because pre-0.25.0 devices (and every historized tag='config'
+// row written before their upgrade) don't have them at all.
 export type ProfileConfig = {
   profile: string;
   enabled: boolean;
@@ -41,6 +59,11 @@ export type ProfileConfig = {
   day_light_off: string;
   uvb_on: string;
   uvb_off: string;
+  basking_on?: string;
+  basking_off?: string;
+  day_light_ranges?: LightWindow[];
+  uvb_ranges?: LightWindow[];
+  basking_ranges?: LightWindow[];
   timezone: string;
   ota_url: string;
   kasa_ip?: string;

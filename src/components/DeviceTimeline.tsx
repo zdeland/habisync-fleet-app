@@ -18,6 +18,7 @@ import { deriveHealthEvents, findTelemetryGaps, mergeTimelineEntries, type Timel
 import { msSinceDeviceBoot, OUTLET_MISMATCH_DEBOUNCE_SAMPLES, STALE_AFTER_MS } from '@/lib/queries';
 import type { Device, LogLevel, LogRow, LogTag, ProfileConfig, OutletAlertRow } from '@/lib/types';
 import { celsiusDeltaToFahrenheit, celsiusToFahrenheit, tempRangeC } from '@/lib/units';
+import { lightWindows, type LightRole } from '@/lib/schedule';
 import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
 import { GAUGE_COLORS } from '@/lib/gaugeColors';
 import { closeOutletAlert, escalateOutletAlert } from '@/app/devices/[deviceId]/actions';
@@ -143,6 +144,9 @@ const ROLE_ICONS: Record<string, string> = {
   Mister: '💧',
   Fan: '🌀',
   'UVB Light': '🔆',
+  // Sixth role, firmware 0.25.0+ (docs/automation-rules.md §8). Runs on its
+  // own clock windows under the same forced-off heat override as UVB.
+  'Basking Spot': '🔦',
 };
 
 // Unassigned/custom outlet roles (a raw Kasa alias) fall back to a plug icon.
@@ -258,7 +262,7 @@ function ReadingCard({
   //
   // belowOutletOn/aboveActive come from the reconstructed automation state
   // (evaluateClimateStep), which only advances while automation is enabled
-  // (automation-rules.md §8) — while disabled it's frozen at whatever it
+  // (automation-rules.md §9) — while disabled it's frozen at whatever it
   // last was (often never-triggered), so trusting it here can show IN RANGE
   // for a reading that's actually past the threshold. Automation disabled
   // (or unknown) falls back to a plain, unlatched comparison instead.
@@ -313,6 +317,17 @@ function ReadingCard({
   );
 }
 
+// Firmware 0.25.0 gives each light up to three windows, so a row is a list
+// rather than one on/off pair. Basking Spot is omitted entirely (not shown
+// as empty) on a pre-0.25.0 snapshot, where lightWindows() returns null —
+// the role genuinely doesn't exist there, which is different from existing
+// with nothing scheduled.
+const LIGHT_SCHEDULE_ROWS: { role: LightRole; label: string }[] = [
+  { role: 'day_light', label: 'Day Light' },
+  { role: 'uvb', label: 'UVB' },
+  { role: 'basking', label: 'Basking Spot' },
+];
+
 // Everything in profile_config that isn't a temp/humidity target — the
 // species profile itself and its light/UVB schedule — shown once alongside
 // the reading cards rather than repeated per-card.
@@ -328,17 +343,28 @@ function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null
       </summary>
       {profileConfig && (
         <div className="flex flex-col gap-3 px-4 pb-4">
-          <div className="border-t border-white/10 pt-3">
-            <p className="text-[0.75em] text-device-text-tertiary">Day Light</p>
-            <p className="text-[0.85em] text-device-text">
-              {profileConfig.day_light_on} – {profileConfig.day_light_off}
-            </p>
-          </div>
-          <div>
-            <p className="text-[0.75em] text-device-text-tertiary">UVB</p>
-            <p className="text-[0.85em] text-device-text">
-              {profileConfig.uvb_on} – {profileConfig.uvb_off}
-            </p>
+          <div className="flex flex-col gap-3 border-t border-white/10 pt-3">
+            {LIGHT_SCHEDULE_ROWS.map(({ role, label }) => {
+              const windows = lightWindows(profileConfig, role);
+              if (windows === null) return null;
+              return (
+                <div key={role}>
+                  <p className="text-[0.75em] text-device-text-tertiary">{label}</p>
+                  {windows.length === 0 ? (
+                    <p className="text-[0.85em] text-device-text-tertiary">Not scheduled</p>
+                  ) : (
+                    // Windows aren't sorted or deduplicated by firmware, so
+                    // they're rendered in the order they arrive and keyed by
+                    // position — two identical windows are a legal config.
+                    windows.map((range, index) => (
+                      <p key={index} className="text-[0.85em] text-device-text">
+                        {range.on} – {range.off}
+                      </p>
+                    ))
+                  )}
+                </div>
+              );
+            })}
           </div>
           <div>
             <p className="text-[0.75em] text-device-text-tertiary">Timezone</p>
@@ -859,7 +885,7 @@ export default function DeviceTimeline({
 // (telemetry.outlet_mask) disagreed with its last logged tag='event'
 // transition for OUTLET_MISMATCH_DEBOUNCE_SAMPLES consecutive samples —
 // long enough to rule out the ordinary lag between a real flip and its
-// event row landing (docs/automation-rules.md §9). Renders nothing when
+// event row landing (docs/automation-rules.md §10). Renders nothing when
 // there's nothing active.
 function AttentionCard({ items, deviceId, device }: { items: OutletAlertRow[]; deviceId: string; device: Device }) {
   if (items.length === 0) return null;
