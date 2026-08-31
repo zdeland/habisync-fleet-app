@@ -31,6 +31,12 @@ const RANGES: Record<LightRole, keyof ProfileConfig> = {
  * The returned windows are deliberately unnormalized: firmware neither sorts
  * nor merges them, so they may overlap and arrive in any order. Don't assume
  * a disjoint, ordered set.
+ *
+ * Each window also carries the `fan` assist flag. It drives the Fan outlet,
+ * not this light's own, so it means nothing to a caller asking "is this
+ * light on" — it's here because fan assist ORs across all three roles'
+ * windows at once (docs/automation-rules.md §5a), which is exactly what
+ * this function makes reachable.
  */
 export function lightWindows(profileConfig: ProfileConfig | null, role: LightRole): LightWindow[] | null {
   if (!profileConfig) return null;

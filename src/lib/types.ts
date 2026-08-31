@@ -24,9 +24,22 @@ export type LogTag =
 // profile_config's `*_ranges` arrays (firmware 0.25.0+). Times are "HH:MM"
 // in the device's local timezone; on == off means "never on", and a window
 // may wrap past midnight (docs/automation-rules.md §6).
+//
+// `fan` is fan assist, added later in 0.26.0 (§5a): a ticked window runs
+// the Fan outlet for its duration, venting a bulb's heat while it's lit
+// instead of waiting for the temperature ceiling. Optional because 0.25.0
+// devices have windows but no fan assist at all, so absent-means-false
+// isn't just a safe default here — it's exactly right for that shape, and
+// 0.26.0 writes the key on every window.
+//
+// Firmware defaults it true on basking windows and false elsewhere, but
+// that default is applied at write time and is not a rule to re-apply when
+// reading: inferring true from the role would override a window a keeper
+// deliberately unticked.
 export type LightWindow = {
   on: string;
   off: string;
+  fan?: boolean;
 };
 
 // Firmware 0.5.0 switched the wire format from Fahrenheit to Celsius

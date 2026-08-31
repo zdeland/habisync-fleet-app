@@ -14,6 +14,10 @@
 // src/lib/schedule.ts's lightWindows() and OR in_window across all of
 // them — testing only the first window is the §6 trap that produces
 // confident-looking false anomalies.
+//
+// That same missing clock is why the Fan rule below is incomplete as of
+// firmware 0.26.0: fan assist (§5a) adds a third term driven by those same
+// windows, so `decision.fan` is the climate half alone. See its comment.
 
 export const TEMP_HYSTERESIS_C = 1.0;
 export const HUMIDITY_HYSTERESIS_PCT = 3.0;
@@ -44,6 +48,23 @@ export const INITIAL_CLIMATE_STATE: ClimateState = {
 export type ClimateDecision = {
   heat: boolean;
   mist: boolean;
+  // The CLIMATE half of the Fan rule only — `temp_trigger OR hum_trigger`.
+  // Firmware 0.26.0 added a third term, fan assist (automation-rules.md
+  // §5a): a lighting window with `fan` ticked runs the Fan for its
+  // duration, and basking windows are ticked by default. Computing it needs
+  // the device's local time, the same thing blocking §6-8 below, so this
+  // field is a LOWER BOUND on the fan's real state.
+  //
+  // It's still exact wherever no window in the snapshot has `fan` ticked —
+  // fan_assist is false at every instant then — which covers the whole
+  // pre-0.26.0 fleet and needs no clock to check. That, not a version
+  // comparison, is the gate for the §11 fan anomaly check; against a
+  // snapshot that does have a ticked window, this field will report a stuck
+  // relay on an ordinary, correctly-behaving device.
+  //
+  // It stays named `fan` because climate_vectors.json's own vectors use that
+  // key and test/automation.test.ts deep-equals the whole decision against
+  // them; the fixture has no lighting scenarios, so it can't pin the term.
   fan: boolean;
   tooHot: boolean; // = tempTrigger, exposed under climate_vectors.json's naming
   tooHumid: boolean; // = humTrigger
@@ -94,10 +115,12 @@ export function evaluateClimateStep(
     mist = false;
   }
 
-  // Fan (§5): two independent ceiling-only triggers, OR'd. The hysteresis
-  // band sits BELOW the ceiling here (tempHigh - hysteresis), a different
-  // location than the Heater's own band (tempLow + hysteresis) — don't
-  // reuse one dead-band calculation for both.
+  // Fan (§5): two independent ceiling-only triggers, OR'd — two of the
+  // three terms the rule has as of 0.26.0, the missing one being fan
+  // assist (§5a).
+  // The hysteresis band sits BELOW the ceiling here (tempHigh -
+  // hysteresis), a different location than the Heater's own band (tempLow
+  // + hysteresis) — don't reuse one dead-band calculation for both.
   let tempTrigger = state.tempTrigger;
   if (tempC >= profile.tempHigh) {
     tempTrigger = true;

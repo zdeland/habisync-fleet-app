@@ -32,7 +32,8 @@ Per device, per instant:
 - **`devices.profile_config`** (or the historized `logs.tag='config'` row
   in effect at that instant, per the webapp plan §3) — `enabled`,
   `temp_low_c`, `temp_high_c`, `hum_low`, `hum_high`, `day_light_ranges`,
-  `uvb_ranges`, `basking_ranges`, `timezone`. Same firmware-version caveat
+  `uvb_ranges`, `basking_ranges` (each window carrying `on`, `off` and the
+  `fan` assist flag of §5a), `timezone`. Same firmware-version caveat
   in both directions — older snapshots carry `temp_low_f`/`temp_high_f`
   instead of the Celsius pair, and carry the single-window scalars
   (`day_light_on`/`day_light_off`, `uvb_on`/`uvb_off`) instead of the
@@ -102,7 +103,7 @@ elif mist == ON  and hum >= hum_low + 3.0: mist = OFF
 else:                                     mist = <unchanged>
 ```
 
-## 5. Fan (dual safety-ceiling vent)
+## 5. Fan (safety-ceiling vent, plus fan assist)
 
 Outlet role: `"Fan"`. Independent of Heater/Mister — reacts only to the
 *high* ceilings, never the low thresholds:
@@ -116,7 +117,7 @@ hum_trigger:
   if hum >= hum_high:                                hum_trigger = ON
   elif hum_trigger == ON and hum < hum_high - 3.0:    hum_trigger = OFF
 
-fan = temp_trigger OR hum_trigger
+fan = temp_trigger OR hum_trigger OR fan_assist
 ```
 
 Note the hysteresis band here sits **below the ceiling**
@@ -135,6 +136,57 @@ recompute `temp_trigger`/`hum_trigger` yourself from `telemetry.temp_c`/
 expect the logged reason to go stale on those, independent of anything the
 recomputed `fan` boolean says.
 
+### 5a. Fan assist (firmware 0.26.0+)
+
+Each lighting window (§6-8) carries a `fan` flag. A ticked window runs the
+Fan for that window's duration — venting a bulb's heat while it's lit,
+rather than waiting for the temperature to reach its ceiling. This is the
+**third term** in the formula above, and it is new in 0.26.0:
+
+```
+fan_assist = ANY(r.fan AND in_window(now_local, r.on, r.off)
+                 for r in day_light_ranges + uvb_ranges + basking_ranges)
+```
+
+Firmware writes `fan` on every window, defaulting **true on basking
+windows** and false elsewhere. That default is applied when the window is
+written, not something a reader should re-derive — an absent flag is
+false, and inferring true from the role would override a window a keeper
+deliberately unticked.
+
+Note this splits the fleet three ways, not two: multi-window landed in
+0.25.0 and fan assist in 0.26.0, so a 0.25.0 device (and every historized
+`tag='config'` row written under it) carries `*_ranges` with **no `fan`
+keys and no fan assist at all**. Detect on the flag, exactly as §6 detects
+multi-window on the array key — the three shapes are
+
+| Snapshot | `*_ranges` | `fan` on its windows |
+|---|---|---|
+| Pre-0.25.0 | absent — use the scalars | n/a |
+| 0.25.0 | present | absent; fan assist doesn't exist |
+| 0.26.0+ | present | written on every window |
+
+Three properties worth holding onto:
+
+- **It follows the window, not the bulb.** A light suppressed by the
+  too-hot cutout (§7, §8) still contributes its term. That's deliberate:
+  the enclosure is over its ceiling then, so `temp_trigger` wants the fan
+  running anyway.
+- **It is purely additive.** It only ever turns the fan on, never
+  suppresses one the ceilings already want. A device with every box
+  unticked behaves exactly like pre-0.26.0 firmware.
+- **It needs a synced clock**, like every other schedule term — so the
+  §9 NTP blind spot applies to the fan now too, not just to the lights.
+
+**Why this one is urgent.** A validator still on the two-term formula sees
+the fan ON with both triggers OFF and flags a stuck relay — the exact
+anomaly in §11. Because basking windows are ticked by default, that fires
+on ordinary, correctly-behaving devices rather than as a rare edge case.
+This repo's `src/lib/automation.ts` computes only the two climate terms
+today (the third needs the same local clock that blocks §6-8), so its
+`decision.fan` is a **lower bound** — see the comment on `ClimateDecision`
+before building any fan check on it.
+
 ## 6. Day Light
 
 Outlet role: `"Day Light"`. Only evaluated while
@@ -152,11 +204,14 @@ with **up to three independent windows per day**, and did the same for UVB
 in *any* window:
 
 ```
-"day_light_ranges": [{"on": "07:00", "off": "19:00"}],
-"uvb_ranges":       [{"on": "08:00", "off": "11:00"},
-                     {"on": "15:00", "off": "18:00"}],
-"basking_ranges":   []
+"day_light_ranges": [{"on": "07:00", "off": "19:00", "fan": false}],
+"uvb_ranges":       [{"on": "08:00", "off": "11:00", "fan": false},
+                     {"on": "15:00", "off": "18:00", "fan": false}],
+"basking_ranges":   [{"on": "09:00", "off": "17:00", "fan": true}]
 ```
+
+Each window's `fan` flag is fan assist — it drives the **Fan** outlet, not
+the light's own, and is specified in §5a rather than here.
 
 Reading the arrays correctly:
 
@@ -240,6 +295,11 @@ Two things to get right:
   its state to track `temp_low_c`/`temp_high_c` in either direction, and
   don't infer a relationship from the two often being on together.
 
+Its windows are also the ones firmware ticks for fan assist by default
+(§5a) — so on a device with a basking schedule, expect the Fan to be on
+through that window with neither ceiling trigger active. That is correct
+behavior, not a stuck relay.
+
 Nothing about `outlet_mask` changes structurally: Basking Spot is just
 another outlet index, and unassigned means no bit moves, same as any other
 absent role. Pre-0.25.0 devices never carry `"Basking Spot"` in
@@ -273,6 +333,7 @@ whether an apparent mismatch is just normal lag vs. a real bug:
 | Sensor read (updates live temp/hum) | 2s |
 | Heater/Mister/Fan re-evaluation | 30s |
 | Day Light/UVB/Basking schedule re-check | 15s |
+| Fan assist re-evaluation (§5a) | 30s |
 | Telemetry sample shipped | 60s |
 | Heartbeat (`devices` upsert, `profile_config` snapshot) | 5 min |
 
@@ -280,6 +341,10 @@ A recomputed decision that disagrees with the reported `outlet_mask` for
 one telemetry sample (≤60s) is expected noise from this cadence gap, not
 necessarily an anomaly — only flag a mismatch that **persists across
 multiple consecutive telemetry samples**.
+
+Fan assist is written on the climate interval, not the faster schedule
+one, so expect up to ~30s of lag at a ticked window's boundary — longer
+than the lights' own 15s, on the same edge.
 
 ## 11. Anomaly conditions worth flagging
 
@@ -298,10 +363,21 @@ config says it should":
   several consecutive telemetry samples (not just one), while
   `enabled == true` and (for the scheduled lights) the device is well past
   its last boot.
-- Fan `outlet_mask` bit is ON while both recomputed `temp_trigger` and
-  `hum_trigger` are OFF (or vice versa) for a sustained stretch — flags
-  either a stuck relay/Kasa outlet, or the device running firmware whose
-  fan logic has diverged from this spec.
+- Fan `outlet_mask` bit is ON while the recomputed `fan` is OFF (or vice
+  versa) for a sustained stretch — flags either a stuck relay/Kasa outlet,
+  or the device running firmware whose fan logic has diverged from this
+  spec. **Only valid against all three terms** (§5a): `temp_trigger OR
+  hum_trigger` alone reports a stuck relay for the whole duration of any
+  ticked window, and basking windows are ticked by default, so the
+  two-term version fires on healthy devices.
+
+  Gate it on the snapshot, not on a version — the two-term formula is
+  exactly right whenever **no window in that snapshot has `fan` ticked**,
+  because `fan_assist` is then false at every instant. That covers
+  pre-0.25.0 and every 0.25.0 device outright, plus any 0.26.0 device with
+  the boxes unticked, and needs no clock to determine. Where a ticked
+  window does exist, skip the check until fan assist is actually computed
+  rather than reporting a mismatch you know to be spurious.
 - UVB or Basking Spot `outlet_mask` bit is ON while the recomputed
   `temp_trigger` is active — the forced-off override isn't taking effect
   (possible bug or pre-override firmware version). The check is identical
