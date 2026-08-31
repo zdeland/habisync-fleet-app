@@ -154,17 +154,23 @@ written, not something a reader should re-derive — an absent flag is
 false, and inferring true from the role would override a window a keeper
 deliberately unticked.
 
-Note this splits the fleet three ways, not two: multi-window landed in
-0.25.0 and fan assist in 0.26.0, so a 0.25.0 device (and every historized
-`tag='config'` row written under it) carries `*_ranges` with **no `fan`
-keys and no fan assist at all**. Detect on the flag, exactly as §6 detects
-multi-window on the array key — the three shapes are
+Multi-window landed in 0.25.0 and fan assist in 0.26.0, so in principle
+there's a middle shape — `*_ranges` present with no `fan` keys — but
+**0.25.0 was never deployed**, so no device and no historized
+`tag='config'` row carries it. In the field the two changes arrive
+together:
 
 | Snapshot | `*_ranges` | `fan` on its windows |
 |---|---|---|
-| Pre-0.25.0 | absent — use the scalars | n/a |
-| 0.25.0 | present | absent; fan assist doesn't exist |
+| Pre-0.25.0 (the whole un-upgraded fleet) | absent — use the scalars | n/a |
 | 0.26.0+ | present | written on every window |
+| *(0.25.0 — never deployed)* | *present* | *absent* |
+
+Read the flag anyway rather than inferring it from `*_ranges` being
+present: absent-means-false costs nothing, and it's what a bench unit or a
+hand-written row would need. Just don't design around the middle row or
+treat it as a fleet state to reconcile — detect on the flag, exactly as §6
+detects multi-window on the array key.
 
 Three properties worth holding onto:
 
@@ -373,11 +379,12 @@ config says it should":
 
   Gate it on the snapshot, not on a version — the two-term formula is
   exactly right whenever **no window in that snapshot has `fan` ticked**,
-  because `fan_assist` is then false at every instant. That covers
-  pre-0.25.0 and every 0.25.0 device outright, plus any 0.26.0 device with
-  the boxes unticked, and needs no clock to determine. Where a ticked
-  window does exist, skip the check until fan assist is actually computed
-  rather than reporting a mismatch you know to be spurious.
+  because `fan_assist` is then false at every instant. That covers the
+  entire un-upgraded fleet outright (no `*_ranges` at all means no ticked
+  window), plus any 0.26.0 device with the boxes unticked, and needs no
+  clock to determine. Where a ticked window does exist, skip the check
+  until fan assist is actually computed rather than reporting a mismatch
+  you know to be spurious.
 - UVB or Basking Spot `outlet_mask` bit is ON while the recomputed
   `temp_trigger` is active — the forced-off override isn't taking effect
   (possible bug or pre-override firmware version). The check is identical

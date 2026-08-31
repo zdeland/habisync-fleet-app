@@ -25,12 +25,13 @@ export type LogTag =
 // in the device's local timezone; on == off means "never on", and a window
 // may wrap past midnight (docs/automation-rules.md §6).
 //
-// `fan` is fan assist, added later in 0.26.0 (§5a): a ticked window runs
-// the Fan outlet for its duration, venting a bulb's heat while it's lit
-// instead of waiting for the temperature ceiling. Optional because 0.25.0
-// devices have windows but no fan assist at all, so absent-means-false
-// isn't just a safe default here — it's exactly right for that shape, and
-// 0.26.0 writes the key on every window.
+// `fan` is fan assist, added in 0.26.0 (§5a): a ticked window runs the Fan
+// outlet for its duration, venting a bulb's heat while it's lit instead of
+// waiting for the temperature ceiling. Optional only defensively — 0.25.0
+// would have had windows without it, but was never deployed, so in the
+// field a snapshot with `*_ranges` is 0.26.0+ and carries the key on every
+// window. Absent still means false; it costs nothing and is what a bench
+// unit or hand-written row would need.
 //
 // Firmware defaults it true on basking windows and false elsewhere, but
 // that default is applied at write time and is not a rule to re-apply when

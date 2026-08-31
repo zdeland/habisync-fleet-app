@@ -57,10 +57,11 @@ export type ClimateDecision = {
   //
   // It's still exact wherever no window in the snapshot has `fan` ticked —
   // fan_assist is false at every instant then — which covers the whole
-  // pre-0.26.0 fleet and needs no clock to check. That, not a version
-  // comparison, is the gate for the §11 fan anomaly check; against a
-  // snapshot that does have a ticked window, this field will report a stuck
-  // relay on an ordinary, correctly-behaving device.
+  // un-upgraded fleet, since no *_ranges at all means no ticked window, and
+  // needs no clock to check. That, not a version comparison, is the gate
+  // for the §11 fan anomaly check; against a snapshot that does have a
+  // ticked window, this field will report a stuck relay on an ordinary,
+  // correctly-behaving device.
   //
   // It stays named `fan` because climate_vectors.json's own vectors use that
   // key and test/automation.test.ts deep-equals the whole decision against
