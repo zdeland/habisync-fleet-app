@@ -32,6 +32,8 @@ function deriveStatus({ isStale, recentErrorCount, activeOutletAlerts }: DeviceH
   return 'healthy';
 }
 
+type RangeBadge = { className: string; textClassName: string; label: string };
+
 // Simple snapshot compare against the user-defined range — unlike the device
 // timeline's gauges, the fleet table only has the latest telemetry point (no
 // history to replay through automation.ts), so there's no hysteresis or
@@ -45,7 +47,7 @@ function deriveRangeBadge(
   lowLabel: string,
   highLabel: string,
   lowColor: typeof GAUGE_COLORS.cool,
-): { className: string; textClassName: string; label: string } {
+): RangeBadge {
   const hasRange = low != null && high != null;
 
   // The value's color tracks where the reading sits against the device's
@@ -76,26 +78,42 @@ function deriveRangeBadge(
 // doesn't matter here, only the resolved temp_low/high_c and hum_low/high
 // on that device's profile_config), alert when above, good when in range —
 // so the number itself reads at a glance without having to read the badge.
-function RangeCell({
+// Rendered identically by the desktop table cell and the phone card, so a
+// reading reads the same on both. `valueClassName` is the only thing the
+// two disagree on: on a phone, temp and humidity are the whole point of the
+// screen and get a display-sized number, where a table cell wants body text.
+function RangeValue({
   value,
   unit,
   badge,
+  valueClassName = '',
 }: {
   value: number | null;
   unit: string;
-  badge: { className: string; textClassName: string; label: string };
+  badge: RangeBadge;
+  valueClassName?: string;
 }) {
   return (
-    <td className="px-4 py-3">
-      <div className={`font-mono ${badge.textClassName}`}>{value != null ? `${value.toFixed(1)}${unit}` : '—'}</div>
+    <>
+      <div className={`font-mono ${valueClassName} ${badge.textClassName}`}>
+        {value != null ? `${value.toFixed(1)}${unit}` : '—'}
+      </div>
       <div className={`mt-1 inline-block rounded px-2 py-0.5 text-[0.7em] font-mono font-semibold ${badge.className}`}>
         {badge.label}
       </div>
+    </>
+  );
+}
+
+function RangeCell({ value, unit, badge }: { value: number | null; unit: string; badge: RangeBadge }) {
+  return (
+    <td className="px-4 py-3">
+      <RangeValue value={value} unit={unit} badge={badge} />
     </td>
   );
 }
 
-function deriveTempBadge(telemetry: TelemetryRow | null, profileConfig: ProfileConfig): { className: string; textClassName: string; label: string } {
+function deriveTempBadge(telemetry: TelemetryRow | null, profileConfig: ProfileConfig): RangeBadge {
   const range = tempRangeC(profileConfig);
   return deriveRangeBadge(
     telemetry ? celsiusToFahrenheit(telemetry.temp_c) : null,
@@ -108,7 +126,7 @@ function deriveTempBadge(telemetry: TelemetryRow | null, profileConfig: ProfileC
   );
 }
 
-function deriveHumidityBadge(telemetry: TelemetryRow | null, profileConfig: ProfileConfig): { className: string; textClassName: string; label: string } {
+function deriveHumidityBadge(telemetry: TelemetryRow | null, profileConfig: ProfileConfig): RangeBadge {
   return deriveRangeBadge(
     telemetry?.hum ?? null,
     profileConfig.hum_low,
@@ -191,18 +209,113 @@ function AttentionCell({ alerts, href }: { alerts: OutletAlertRow[]; href: strin
   );
 }
 
+// Everything a row needs that's computed rather than read straight off the
+// entry. Derived once, then handed to both presentations below — the phone
+// cards and the desktop table state the same facts about a device, so this
+// lives here rather than in either renderer, where the two could quietly
+// drift apart the way two copies of the column list would.
+type DeviceRow = {
+  entry: DeviceHealth;
+  href: string;
+  status: (typeof STATUS_META)[keyof typeof STATUS_META];
+  tempF: number | null;
+  hum: number | null;
+  tempBadge: RangeBadge;
+  humBadge: RangeBadge;
+  isOutdated: boolean;
+  lastSeenLabel: string;
+};
+
+function deriveRow(entry: DeviceHealth, latestFwVersion: string | null): DeviceRow {
+  return {
+    entry,
+    href: `/devices/${entry.device.device_id}`,
+    status: STATUS_META[deriveStatus(entry)],
+    tempF: entry.latestTelemetry ? celsiusToFahrenheit(entry.latestTelemetry.temp_c) : null,
+    hum: entry.latestTelemetry?.hum ?? null,
+    tempBadge: deriveTempBadge(entry.latestTelemetry, entry.device.profile_config),
+    humBadge: deriveHumidityBadge(entry.latestTelemetry, entry.device.profile_config),
+    isOutdated: latestFwVersion != null && compareFwVersions(entry.device.fw_version, latestFwVersion) < 0,
+    lastSeenLabel: formatLastSeen(entry.device.last_seen, entry.isStale),
+  };
+}
+
+// The nine-column table can't be read on a phone — even scrolled, finding a
+// humidity reading means swiping past six columns nobody opened the page
+// for. Below `md` each device becomes a card instead, ordered by what you
+// actually came to check: which device, how warm, how humid. Status stays
+// on the top line because it's the reason you'd tap in; firmware, backend,
+// error count and last-seen are demoted to one muted footer line, still
+// present but no longer competing.
+function DeviceCard({ row, isFavorite }: { row: DeviceRow; isFavorite: boolean }) {
+  const router = useRouter();
+  const { entry, href, status, tempF, hum, tempBadge, humBadge, isOutdated, lastSeenLabel } = row;
+
+  return (
+    <div
+      onClick={() => router.push(href)}
+      className="cursor-pointer rounded-xl bg-device-surface p-4 transition active:bg-device-surface-hover"
+    >
+      <div className="flex items-start gap-3">
+        <FavoriteToggle deviceId={entry.device.device_id} isFavorite={isFavorite} />
+        {/* min-w-0 so a long device name truncates instead of shoving the
+            status label off the right edge — the same clipping-with-no-way-
+            back that made this redesign necessary. */}
+        <div className="min-w-0 flex-1">
+          <Link
+            href={href}
+            onClick={(event) => event.stopPropagation()}
+            className="block truncate font-medium text-device-text hover:text-device-accent hover:underline"
+          >
+            {entry.device.name}
+          </Link>
+          <div className="truncate font-mono text-xs text-device-text-tertiary">{entry.device.device_id}</div>
+        </div>
+        <div className="flex flex-shrink-0 items-center gap-1.5 pt-0.5 font-mono text-[0.7em] text-device-text-secondary">
+          <span className={`h-2 w-2 flex-shrink-0 rounded-full ${status.dot}`} />
+          <span>{status.label}</span>
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className="rounded-lg bg-white/5 p-3">
+          <p className="text-[0.7em] font-medium uppercase tracking-wider text-device-text-tertiary">Temp</p>
+          <RangeValue value={tempF} unit="°F" badge={tempBadge} valueClassName="mt-0.5 text-xl" />
+        </div>
+        <div className="rounded-lg bg-white/5 p-3">
+          <p className="text-[0.7em] font-medium uppercase tracking-wider text-device-text-tertiary">Humidity</p>
+          <RangeValue value={hum} unit="%" badge={humBadge} valueClassName="mt-0.5 text-xl" />
+        </div>
+      </div>
+
+      {entry.activeOutletAlerts.length > 0 && (
+        <div className="mt-3">
+          <AttentionCell alerts={entry.activeOutletAlerts} href={href} />
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[0.7em] text-device-text-tertiary">
+        <span>{lastSeenLabel}</span>
+        <span aria-hidden="true">·</span>
+        <span>
+          {entry.recentErrorCount} error{entry.recentErrorCount === 1 ? '' : 's'} (24h)
+        </span>
+        <span aria-hidden="true">·</span>
+        <span className={isOutdated ? 'text-device-heating' : undefined}>
+          {entry.device.fw_version}
+          {isOutdated && ' · OUTDATED'}
+        </span>
+        <span aria-hidden="true">·</span>
+        <span>{entry.device.active_backend}</span>
+      </div>
+    </div>
+  );
+}
+
 // Shared thead + tbody markup for both the active table and the collapsed
 // offline one below it — kept as one component so the two sections can't
 // drift out of sync on columns.
-function DeviceRows({
-  fleet,
-  latestFwVersion,
-  favoriteDeviceIds,
-}: {
-  fleet: DeviceHealth[];
-  latestFwVersion: string | null;
-  favoriteDeviceIds: Set<string>;
-}) {
+function DeviceTable({ rows, favoriteDeviceIds }: { rows: DeviceRow[]; favoriteDeviceIds: Set<string> }) {
   const router = useRouter();
 
   return (
@@ -223,64 +336,88 @@ function DeviceRows({
         </tr>
       </thead>
       <tbody className="divide-y divide-white/10">
-        {fleet.map((entry) => {
-          const status = STATUS_META[deriveStatus(entry)];
-          const href = `/devices/${entry.device.device_id}`;
-          const tempF = entry.latestTelemetry ? celsiusToFahrenheit(entry.latestTelemetry.temp_c) : null;
-          const tempBadge = deriveTempBadge(entry.latestTelemetry, entry.device.profile_config);
-          const humBadge = deriveHumidityBadge(entry.latestTelemetry, entry.device.profile_config);
-          const isOutdated =
-            latestFwVersion != null && compareFwVersions(entry.device.fw_version, latestFwVersion) < 0;
-          return (
-            <tr
-              key={entry.device.device_id}
-              onClick={() => router.push(href)}
-              className="cursor-pointer transition hover:bg-device-surface-hover"
-            >
-              <td className="px-4 py-3">
-                <FavoriteToggle deviceId={entry.device.device_id} isFavorite={favoriteDeviceIds.has(entry.device.device_id)} />
-              </td>
-              <td className="px-4 py-3">
-                <Link
-                  href={href}
-                  onClick={(event) => event.stopPropagation()}
-                  className="font-medium text-device-text hover:text-device-accent hover:underline"
-                >
-                  {entry.device.name}
-                </Link>
-                <div className="text-xs text-device-text-tertiary">{entry.device.device_id}</div>
-              </td>
-              <RangeCell value={tempF} unit="°F" badge={tempBadge} />
-              <RangeCell value={entry.latestTelemetry?.hum ?? null} unit="%" badge={humBadge} />
-              <td className="px-4 py-3">
-                <div className="flex items-center gap-2 font-mono text-xs">
-                  <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${status.dot}`} />
-                  <span>{status.label}</span>
+        {rows.map(({ entry, href, status, tempF, hum, tempBadge, humBadge, isOutdated, lastSeenLabel }) => (
+          <tr
+            key={entry.device.device_id}
+            onClick={() => router.push(href)}
+            className="cursor-pointer transition hover:bg-device-surface-hover"
+          >
+            <td className="px-4 py-3">
+              <FavoriteToggle deviceId={entry.device.device_id} isFavorite={favoriteDeviceIds.has(entry.device.device_id)} />
+            </td>
+            <td className="px-4 py-3">
+              <Link
+                href={href}
+                onClick={(event) => event.stopPropagation()}
+                className="font-medium text-device-text hover:text-device-accent hover:underline"
+              >
+                {entry.device.name}
+              </Link>
+              <div className="text-xs text-device-text-tertiary">{entry.device.device_id}</div>
+            </td>
+            <RangeCell value={tempF} unit="°F" badge={tempBadge} />
+            <RangeCell value={hum} unit="%" badge={humBadge} />
+            <td className="px-4 py-3">
+              <div className="flex items-center gap-2 font-mono text-xs">
+                <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${status.dot}`} />
+                <span>{status.label}</span>
+              </div>
+              <div className="mt-1 text-xs text-device-text-tertiary">
+                {entry.recentErrorCount} error{entry.recentErrorCount === 1 ? '' : 's'} (24h)
+              </div>
+            </td>
+            <td className="px-4 py-3">
+              <AttentionCell alerts={entry.activeOutletAlerts} href={href} />
+            </td>
+            <td className="px-4 py-3 text-device-text-secondary">{lastSeenLabel}</td>
+            <td className="px-4 py-3 text-device-text-secondary">
+              <span className={isOutdated ? 'text-device-heating' : undefined}>{entry.device.fw_version}</span>
+              {isOutdated && (
+                <div className="mt-1 inline-block rounded px-2 py-0.5 text-[0.7em] font-mono font-semibold border border-device-heating/40 bg-device-heating/10 text-device-heating">
+                  OUTDATED
                 </div>
-                <div className="mt-1 text-xs text-device-text-tertiary">
-                  {entry.recentErrorCount} error{entry.recentErrorCount === 1 ? '' : 's'} (24h)
-                </div>
-              </td>
-              <td className="px-4 py-3">
-                <AttentionCell alerts={entry.activeOutletAlerts} href={href} />
-              </td>
-              <td className="px-4 py-3 text-device-text-secondary">
-                {formatLastSeen(entry.device.last_seen, entry.isStale)}
-              </td>
-              <td className="px-4 py-3 text-device-text-secondary">
-                <span className={isOutdated ? 'text-device-heating' : undefined}>{entry.device.fw_version}</span>
-                {isOutdated && (
-                  <div className="mt-1 inline-block rounded px-2 py-0.5 text-[0.7em] font-mono font-semibold border border-device-heating/40 bg-device-heating/10 text-device-heating">
-                    OUTDATED
-                  </div>
-                )}
-              </td>
-              <td className="px-4 py-3 text-device-text-secondary">{entry.device.active_backend}</td>
-            </tr>
-          );
-        })}
+              )}
+            </td>
+            <td className="px-4 py-3 text-device-text-secondary">{entry.device.active_backend}</td>
+          </tr>
+        ))}
       </tbody>
     </table>
+  );
+}
+
+// One list of devices, rendered as cards on phones and as the wide table
+// from `md` up. Both branches are fed the same derived rows, and only one
+// is ever in the layout at a time.
+function DeviceRows({
+  fleet,
+  latestFwVersion,
+  favoriteDeviceIds,
+}: {
+  fleet: DeviceHealth[];
+  latestFwVersion: string | null;
+  favoriteDeviceIds: Set<string>;
+}) {
+  const rows = fleet.map((entry) => deriveRow(entry, latestFwVersion));
+
+  return (
+    <>
+      <div className="flex flex-col gap-3 md:hidden">
+        {rows.map((row) => (
+          <DeviceCard
+            key={row.entry.device.device_id}
+            row={row}
+            isFavorite={favoriteDeviceIds.has(row.entry.device.device_id)}
+          />
+        ))}
+      </div>
+      {/* overflow-x-auto, not overflow-hidden: `hidden` clipped every column
+          past the container edge with no way to reach it. The cards above
+          are the real answer on a phone; this keeps a narrow tablet honest. */}
+      <div className="hidden overflow-x-auto rounded-xl md:block">
+        <DeviceTable rows={rows} favoriteDeviceIds={favoriteDeviceIds} />
+      </div>
+    </>
   );
 }
 
@@ -309,22 +446,20 @@ export default function FleetTable({
   return (
     <div className="flex flex-col gap-4">
       {activeFleet.length > 0 && (
-        <div className="overflow-hidden rounded-xl">
-          <DeviceRows fleet={activeFleet} latestFwVersion={latestFwVersion} favoriteDeviceIds={favoriteDeviceIds} />
-        </div>
+        <DeviceRows fleet={activeFleet} latestFwVersion={latestFwVersion} favoriteDeviceIds={favoriteDeviceIds} />
       )}
       {offlineFleet.length > 0 && (
         // Native <details> keeps this keyboard/screen-reader accessible for
         // free instead of hand-rolling open/close state (same pattern as
         // DeviceTimeline.tsx's collapsible sections).
-        <details className="group overflow-hidden rounded-xl bg-device-surface">
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-device-text-secondary">
+        <details className="group">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl bg-device-surface px-4 py-3 text-device-text-secondary">
             <span className="font-medium">
               Offline devices ({offlineFleet.length})
             </span>
             <span className="text-device-text-tertiary transition group-open:rotate-180">▾</span>
           </summary>
-          <div className="overflow-hidden rounded-xl">
+          <div className="pt-3">
             <DeviceRows fleet={offlineFleet} latestFwVersion={latestFwVersion} favoriteDeviceIds={favoriteDeviceIds} />
           </div>
         </details>

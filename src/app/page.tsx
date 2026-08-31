@@ -11,21 +11,21 @@ export default async function HomePage() {
   await requireUser();
 
   return (
-    <main className="min-h-screen bg-device-screen p-6 text-device-text">
+    <main className="min-h-screen bg-device-screen p-4 text-device-text md:p-6">
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
-        <header className="rounded-2xl bg-device-card p-6 shadow-device">
+        <header className="rounded-2xl bg-device-card p-4 shadow-device md:p-6">
           <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <div>
               {/* <p className="text-sm uppercase tracking-[0.3em] text-device-accent">
                 HabiSync Fleet Monitor
               </p> */}
-              <h1 className="text-3xl font-semibold">HabiSync Fleet Monitor</h1>
+              <h1 className="text-2xl font-semibold md:text-3xl">HabiSync Fleet Monitor</h1>
               <p className="mt-2 max-w-2xl text-sm text-device-text-secondary">
                 Review device health, recent activity, and early warning signals
                 from the fleet.
               </p>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <div className="rounded-full border border-device-good/30 bg-device-good/10 px-4 py-2 text-sm text-device-good">
                 Read-only monitoring workspace
               </div>

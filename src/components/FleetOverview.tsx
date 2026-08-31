@@ -18,13 +18,13 @@ export default async function FleetOverview() {
     : [[], new Set<string>()];
 
   return (
-    <section className="rounded-2xl bg-device-card p-6 shadow-device">
-      <div className="mb-4 flex items-center justify-between">
+    <section className="rounded-2xl bg-device-card p-4 shadow-device md:p-6">
+      <div className="mb-4 flex items-start justify-between gap-3">
         <div>
           <h2 className="text-[1.1em]">Device health</h2>
           <p className="text-sm text-device-text-secondary">What needs attention right now, across the fleet.</p>
         </div>
-        <div className="rounded-full bg-device-surface px-3 py-1 text-sm text-device-text-secondary">
+        <div className="flex-shrink-0 rounded-full bg-device-surface px-3 py-1 text-sm text-device-text-secondary">
           {fleet.length} device{fleet.length === 1 ? '' : 's'}
         </div>
       </div>
