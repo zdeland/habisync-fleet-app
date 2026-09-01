@@ -12,6 +12,14 @@ the on-device decision.
 This is a spec of intent, not a guarantee of current firmware behavior on
 every device — cross-check `devices.fw_version` before trusting a
 mismatch as a bug; older firmware may not implement a rule described here.
+Two things about that field: it carries `FIRMWARE_VERSION` verbatim, so the
+wire values have **no `v` prefix** even though the git tags do (`0.26.0` in
+the DB, `v0.26.0` in the firmware repo), and the release line skips
+straight from `0.24.1` to `0.26.0` — nothing ever reported `0.25.0`, which
+was never committed, tagged, or built (§5a). Prefer key-presence feature
+detection to version comparisons regardless: a historized `tag='config'`
+row keeps the shape it was written under, so a device's *current* version
+misjudges its own past rows (§6, §11).
 
 Implemented in this repo as `src/lib/automation.ts` (Heater/Mister/Fan
 only so far — see that file for why the lighting rules aren't implemented
@@ -37,13 +45,13 @@ Per device, per instant:
   in both directions — older snapshots carry `temp_low_f`/`temp_high_f`
   instead of the Celsius pair, and carry the single-window scalars
   (`day_light_on`/`day_light_off`, `uvb_on`/`uvb_off`) instead of the
-  `*_ranges` arrays. The scalars still ship on 0.25.0+ but no longer tell
+  `*_ranges` arrays. The scalars still ship on 0.26.0+ but no longer tell
   the whole story — read them only as described in §6.
 - **`devices.outlet_roles`** (or the matching historized `logs` row) — a
   jsonb array, position *i* = outlet *i*'s role label. Match against the
   literal strings `"Heater"`, `"Mister"`, `"Fan"`, `"Day Light"`,
   `"UVB Light"`, `"Basking Spot"` (exact spelling from
-  `outletRoleLabel()`; the last is firmware 0.25.0+) — any other
+  `outletRoleLabel()`; the last is firmware 0.26.0+) — any other
   string is an unassigned/generic outlet with no automation rule. A role
   absent from the array means that behavior is inactive entirely on that
   device; don't expect any corresponding `outlet_mask` bit to move.
@@ -136,12 +144,12 @@ recompute `temp_trigger`/`hum_trigger` yourself from `telemetry.temp_c`/
 expect the logged reason to go stale on those, independent of anything the
 recomputed `fan` boolean says.
 
-### 5a. Fan assist (firmware 0.26.0+)
+### 5a. Fan assist (firmware 0.27.0+)
 
 Each lighting window (§6-8) carries a `fan` flag. A ticked window runs the
 Fan for that window's duration — venting a bulb's heat while it's lit,
 rather than waiting for the temperature to reach its ceiling. This is the
-**third term** in the formula above, and it is new in 0.26.0:
+**third term** in the formula above, and it is new in 0.27.0:
 
 ```
 fan_assist = ANY(r.fan AND in_window(now_local, r.on, r.off)
@@ -154,23 +162,49 @@ written, not something a reader should re-derive — an absent flag is
 false, and inferring true from the role would override a window a keeper
 deliberately unticked.
 
-Multi-window landed in 0.25.0 and fan assist in 0.26.0, so in principle
-there's a middle shape — `*_ranges` present with no `fan` keys — but
-**0.25.0 was never deployed**, so no device and no historized
-`tag='config'` row carries it. In the field the two changes arrive
-together:
+Multi-window landed in 0.26.0 and fan assist in 0.27.0 — **two separate
+published releases**, which splits the fleet three ways:
 
-| Snapshot | `*_ranges` | `fan` on its windows |
-|---|---|---|
-| Pre-0.25.0 (the whole un-upgraded fleet) | absent — use the scalars | n/a |
-| 0.26.0+ | present | written on every window |
-| *(0.25.0 — never deployed)* | *present* | *absent* |
+| Snapshot | `fw_version` | `*_ranges` | `fan` on its windows |
+|---|---|---|---|
+| Pre-multi-window (the un-upgraded fleet) | `0.24.1` and earlier | absent — use the scalars | n/a |
+| Multi-window, no fan assist | `0.26.0` | present | **absent on every window** |
+| Fan assist | `0.27.0` | present | written on every window |
 
-Read the flag anyway rather than inferring it from `*_ranges` being
-present: absent-means-false costs nothing, and it's what a bench unit or a
-hand-written row would need. Just don't design around the middle row or
-treat it as a fleet state to reconcile — detect on the flag, exactly as §6
-detects multi-window on the array key.
+So `*_ranges` present with **no** `fan` key anywhere is a real, deployed
+shape, not a hypothetical: absent-means-false is load-bearing for an actual
+generation of firmware, not merely a safe default. Never infer `fan` from
+`*_ranges` being present — detect on the flag itself, exactly as §6 detects
+multi-window on the array key.
+
+Three things about that middle row worth knowing:
+
+- **Nothing ever reported `fw_version = 0.25.0`.** That version was never
+  committed, tagged, or built for OTA — its *contents* shipped as 0.26.0.
+  "0.25.0 was never deployed" is true and says nothing about whether the
+  ranges-only shape was; this document previously drew that inference and
+  was wrong.
+- **No device currently reports `0.26.0`, and the shape is still
+  unconfirmed in our own data.** As of 2026-08-31 the fleet is three
+  devices on `0.27.0` (all three carrying `fan` on every window, as above)
+  and four long-stale devices on `0.8.1`–`0.18.4` with scalars only — so
+  the "un-upgraded fleet" is far older than the `0.24.1` boundary in the
+  table. Confirming the middle row means reading historized
+  `tag='config'` rows, and `service_role` has no `SELECT` on `logs` (only
+  what climate-alerts needs was granted); the webapp itself reads them
+  through an authenticated session under RLS. Left unverified rather than
+  widening that grant.
+- **The 0.26.0-only window is narrow, and its reach isn't precisely
+  known.** Both releases were published on 2026-08-30, so no device sat on
+  0.26.0 for long; the firmware team can confirm it was tagged, pushed to
+  OTA and heartbeated by at least a bench ESP32-S3, but not how many
+  customer units ran it. Either way the shape outlives the version, because
+  every device that heartbeated on it wrote append-only `tag='config'` rows
+  that keep it forever — a device on 0.27.0 today still has 0.26.0-shaped
+  rows in its own history. That is exactly why §6 and §11 insist on
+  resolving against the snapshot in effect at the instant being judged
+  rather than `devices.fw_version`. Expect the count of such rows to be
+  small but non-zero.
 
 Three properties worth holding onto:
 
@@ -180,7 +214,7 @@ Three properties worth holding onto:
   running anyway.
 - **It is purely additive.** It only ever turns the fan on, never
   suppresses one the ceilings already want. A device with every box
-  unticked behaves exactly like pre-0.26.0 firmware.
+  unticked behaves exactly like pre-0.27.0 firmware.
 - **It needs a synced clock**, like every other schedule term — so the
   §9 NTP blind spot applies to the fan now too, not just to the lights.
 
@@ -204,7 +238,7 @@ Given those hold:
 day_light = ANY(in_window(now_local, r.on, r.off) for r in day_light_ranges)
 ```
 
-Firmware 0.25.0 replaced the single `day_light_on`/`day_light_off` pair
+Firmware 0.26.0 replaced the single `day_light_on`/`day_light_off` pair
 with **up to three independent windows per day**, and did the same for UVB
 (§7) and the new Basking Spot (§8). The light is on if `now_local` falls
 in *any* window:
@@ -217,7 +251,17 @@ in *any* window:
 ```
 
 Each window's `fan` flag is fan assist — it drives the **Fan** outlet, not
-the light's own, and is specified in §5a rather than here.
+the light's own, and is specified in §5a rather than here. It is absent
+entirely on a 0.26.0 snapshot (§5a's table).
+
+**Verified against live rows** (2026-08-31, the three 0.27.0 devices in
+`devices`), after the firmware team flagged this shape as code-inspected
+rather than observed. Everything above holds: the scalars carry exactly
+`*_ranges[0]`, an empty array does collapse its scalars to
+`"00:00"`/`"00:00"`, a second window is really there on `basking_ranges`,
+and `fan` is written on every window — `true` on basking, `false` on day
+light and UVB, matching §5a's default. (Firmware serialises the keys as
+`{"on", "fan", "off"}`, not that key order means anything in JSON.)
 
 Reading the arrays correctly:
 
@@ -233,7 +277,7 @@ Reading the arrays correctly:
   `"00:00"`/`"00:00"` if that array is empty; same for `uvb_*` and
   `basking_*`.
 - **Fall back to the scalar pair only when the `*_ranges` key is absent**
-  (a pre-0.25.0 device). Feature-detect on key presence rather than
+  (a pre-0.26.0 device). Feature-detect on key presence rather than
   parsing `devices.fw_version`. On a `devices` row the two can't actually
   disagree — `fw_version` and `profile_config` ship in the same heartbeat
   upsert — but historized `logs.tag='config'` rows are append-only and
@@ -284,7 +328,7 @@ identically everywhere.
 
 ## 8. Basking Spot
 
-Outlet role: `"Basking Spot"` (firmware 0.25.0+). Its own windows
+Outlet role: `"Basking Spot"` (firmware 0.26.0+). Its own windows
 (`basking_ranges`, read exactly as in §6), under the **same** forced-off
 heat override as UVB (§7) — a basking lamp is unambiguously a heat source:
 
@@ -308,7 +352,7 @@ behavior, not a stuck relay.
 
 Nothing about `outlet_mask` changes structurally: Basking Spot is just
 another outlet index, and unassigned means no bit moves, same as any other
-absent role. Pre-0.25.0 devices never carry `"Basking Spot"` in
+absent role. Pre-0.26.0 devices never carry `"Basking Spot"` in
 `outlet_roles` and have no `basking_*` fields at all.
 
 ## 9. What `enabled` does and doesn't cover
@@ -380,9 +424,10 @@ config says it should":
   Gate it on the snapshot, not on a version — the two-term formula is
   exactly right whenever **no window in that snapshot has `fan` ticked**,
   because `fan_assist` is then false at every instant. That covers the
-  entire un-upgraded fleet outright (no `*_ranges` at all means no ticked
-  window), plus any 0.26.0 device with the boxes unticked, and needs no
-  clock to determine. Where a ticked window does exist, skip the check
+  entire pre-multi-window fleet outright (no `*_ranges` at all means no
+  ticked window) and every `0.26.0`-shaped snapshot (arrays present, the
+  key absent on all of them), plus any 0.27.0 device with the boxes
+  unticked — and needs no clock to determine. Where a ticked window does exist, skip the check
   until fan assist is actually computed rather than reporting a mismatch
   you know to be spurious.
 - UVB or Basking Spot `outlet_mask` bit is ON while the recomputed

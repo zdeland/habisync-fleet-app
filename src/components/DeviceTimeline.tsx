@@ -144,7 +144,7 @@ const ROLE_ICONS: Record<string, string> = {
   Mister: '💧',
   Fan: '🌀',
   'UVB Light': '🔆',
-  // Sixth role, firmware 0.25.0+ (docs/automation-rules.md §8). Runs on its
+  // Sixth role, firmware 0.26.0+ (docs/automation-rules.md §8). Runs on its
   // own clock windows under the same forced-off heat override as UVB.
   'Basking Spot': '🔦',
 };
@@ -317,9 +317,9 @@ function ReadingCard({
   );
 }
 
-// Firmware 0.25.0 gives each light up to three windows, so a row is a list
+// Firmware 0.26.0 gives each light up to three windows, so a row is a list
 // rather than one on/off pair. Basking Spot is omitted entirely (not shown
-// as empty) on a pre-0.25.0 snapshot, where lightWindows() returns null —
+// as empty) on a pre-0.26.0 snapshot, where lightWindows() returns null —
 // the role genuinely doesn't exist there, which is different from existing
 // with nothing scheduled.
 const LIGHT_SCHEDULE_ROWS: { role: LightRole; label: string }[] = [

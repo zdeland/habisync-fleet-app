@@ -16,7 +16,7 @@
 // confident-looking false anomalies.
 //
 // That same missing clock is why the Fan rule below is incomplete as of
-// firmware 0.26.0: fan assist (§5a) adds a third term driven by those same
+// firmware 0.27.0: fan assist (§5a) adds a third term driven by those same
 // windows, so `decision.fan` is the climate half alone. See its comment.
 
 export const TEMP_HYSTERESIS_C = 1.0;
@@ -49,16 +49,17 @@ export type ClimateDecision = {
   heat: boolean;
   mist: boolean;
   // The CLIMATE half of the Fan rule only — `temp_trigger OR hum_trigger`.
-  // Firmware 0.26.0 added a third term, fan assist (automation-rules.md
+  // Firmware 0.27.0 added a third term, fan assist (automation-rules.md
   // §5a): a lighting window with `fan` ticked runs the Fan for its
   // duration, and basking windows are ticked by default. Computing it needs
   // the device's local time, the same thing blocking §6-8 below, so this
   // field is a LOWER BOUND on the fan's real state.
   //
   // It's still exact wherever no window in the snapshot has `fan` ticked —
-  // fan_assist is false at every instant then — which covers the whole
-  // un-upgraded fleet, since no *_ranges at all means no ticked window, and
-  // needs no clock to check. That, not a version comparison, is the gate
+  // fan_assist is false at every instant then — and needs no clock to
+  // check. That covers the whole pre-multi-window fleet, since no *_ranges
+  // at all means no ticked window, plus every snapshot written by firmware
+  // 0.26.0, which ships the arrays with no `fan` key on any window. That, not a version comparison, is the gate
   // for the §11 fan anomaly check; against a snapshot that does have a
   // ticked window, this field will report a stuck relay on an ordinary,
   // correctly-behaving device.
@@ -117,7 +118,7 @@ export function evaluateClimateStep(
   }
 
   // Fan (§5): two independent ceiling-only triggers, OR'd — two of the
-  // three terms the rule has as of 0.26.0, the missing one being fan
+  // three terms the rule has as of 0.27.0, the missing one being fan
   // assist (§5a).
   // The hysteresis band sits BELOW the ceiling here (tempHigh -
   // hysteresis), a different location than the Heater's own band (tempLow

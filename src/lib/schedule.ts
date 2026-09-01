@@ -1,6 +1,6 @@
 import type { LightWindow, ProfileConfig } from '@/lib/types';
 
-// Firmware 0.25.0 gave each light up to three independent daily windows
+// Firmware 0.26.0 gave each light up to three independent daily windows
 // (docs/automation-rules.md §6). The old scalar pairs still ship, but they
 // carry only `*_ranges[0]` — so anything that reads day_light_on/uvb_on/
 // basking_on directly silently loses every window after the first, and
@@ -26,7 +26,7 @@ const RANGES: Record<LightRole, keyof ProfileConfig> = {
  *
  * `[]` is a real answer meaning "never scheduled on" — distinct from `null`,
  * which means this snapshot says nothing about the role at all (no config,
- * or a pre-0.25.0 device that has never heard of Basking Spot).
+ * or a pre-0.26.0 device that has never heard of Basking Spot).
  *
  * The returned windows are deliberately unnormalized: firmware neither sorts
  * nor merges them, so they may overlap and arrive in any order. Don't assume
@@ -59,7 +59,7 @@ export function lightWindows(profileConfig: ProfileConfig | null, role: LightRol
   // Equal times mean "never on" under the in_window rule (§6), on either
   // shape. Collapsing to [] rather than passing the pair through keeps a
   // no-schedule light from rendering as a literal "00:00 – 00:00" window,
-  // which is how 0.25.0 serializes an empty array back into the scalars.
+  // which is how 0.26.0 serializes an empty array back into the scalars.
   if (onTime === offTime) return [];
 
   return [{ on: onTime, off: offTime }];

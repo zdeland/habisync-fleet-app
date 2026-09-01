@@ -21,17 +21,18 @@ export type LogTag =
   | 'config';
 
 // One scheduled on/off window for a light, as it appears inside
-// profile_config's `*_ranges` arrays (firmware 0.25.0+). Times are "HH:MM"
+// profile_config's `*_ranges` arrays (firmware 0.26.0+). Times are "HH:MM"
 // in the device's local timezone; on == off means "never on", and a window
 // may wrap past midnight (docs/automation-rules.md §6).
 //
-// `fan` is fan assist, added in 0.26.0 (§5a): a ticked window runs the Fan
+// `fan` is fan assist, added in 0.27.0 (§5a): a ticked window runs the Fan
 // outlet for its duration, venting a bulb's heat while it's lit instead of
-// waiting for the temperature ceiling. Optional only defensively — 0.25.0
-// would have had windows without it, but was never deployed, so in the
-// field a snapshot with `*_ranges` is 0.26.0+ and carries the key on every
-// window. Absent still means false; it costs nothing and is what a bench
-// unit or hand-written row would need.
+// waiting for the temperature ceiling. Optional because 0.26.0 — a
+// published, deployed release — writes the arrays with no `fan` key on any
+// window at all, so absent-means-false is load-bearing for a real firmware
+// generation, not just defensive. That shape outlives the version: every
+// historized tag='config' row a 0.26.0 device wrote keeps it, including on
+// devices that have since upgraded to 0.27.0.
 //
 // Firmware defaults it true on basking windows and false elsewhere, but
 // that default is applied at write time and is not a rule to re-apply when
@@ -52,13 +53,13 @@ export type LightWindow = {
 // Both shapes are optional here on purpose — read via src/lib/units.ts's
 // tempRangeC(), never these fields directly.
 //
-// Firmware 0.25.0 did the same thing to the lighting schedule: each light
+// Firmware 0.26.0 did the same thing to the lighting schedule: each light
 // went from one on/off pair to up to three independent windows, and a sixth
 // role (Basking Spot) joined. The scalar pairs still ship, but they now
 // carry *only the first window* — reading them alone silently loses every
 // later window, so read via src/lib/schedule.ts's lightWindows(), never
 // these fields directly. Both the arrays and basking_on/basking_off are
-// optional because pre-0.25.0 devices (and every historized tag='config'
+// optional because pre-0.26.0 devices (and every historized tag='config'
 // row written before their upgrade) don't have them at all.
 export type ProfileConfig = {
   profile: string;
