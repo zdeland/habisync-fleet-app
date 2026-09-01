@@ -41,7 +41,8 @@ Per device, per instant:
   in effect at that instant, per the webapp plan §3) — `enabled`,
   `temp_low_c`, `temp_high_c`, `hum_low`, `hum_high`, `day_light_ranges`,
   `uvb_ranges`, `basking_ranges` (each window carrying `on`, `off` and the
-  `fan` assist flag of §5a), `timezone`. Same firmware-version caveat
+  `fan` assist flag of §5a), `mister_ranges` (the same window shape, but its
+  `fan` key is inert — §4a), `timezone`. Same firmware-version caveat
   in both directions — older snapshots carry `temp_low_f`/`temp_high_f`
   instead of the Celsius pair, and carry the single-window scalars
   (`day_light_on`/`day_light_off`, `uvb_on`/`uvb_off`) instead of the
@@ -99,7 +100,7 @@ telemetry row in isolation. Replay `telemetry` rows **in chronological
 order**, carrying the previous decision forward, exactly like the on-device
 state machine does.
 
-## 4. Mister (hysteresis humidistat)
+## 4. Mister (hysteresis humidistat, plus scheduled spikes)
 
 Outlet role: `"Mister"`. Same shape as Heater, humidity-flavored, no unit
 conversion needed:
@@ -110,6 +111,131 @@ elif mist == OFF and hum < hum_low:      mist = ON
 elif mist == ON  and hum >= hum_low + 3.0: mist = OFF
 else:                                     mist = <unchanged>
 ```
+
+Call that boolean `humidistat`. It is the entire rule on every deployed
+firmware to date, and is unchanged by what follows — same thresholds, same
+3.0 %RH hysteresis, same ceiling. In 0.28.0, which is **not yet released**
+(see the end of §4a), it becomes **one of two terms**.
+
+### 4a. Scheduled mist windows (firmware 0.28.0 — unreleased)
+
+`profile_config` gains a fourth ranges array, in exactly the shape the three
+lighting arrays use (§6), read with the same `in_window` — midnight-crossing
+windows included:
+
+```json
+"mister_ranges": [{"on": "07:30", "off": "07:45", "fan": false},
+                  {"on": "21:00", "off": "21:10", "fan": false}]
+```
+
+```
+mist_window = ANY(in_window(now_local, r.on, r.off) for r in mister_ranges)
+
+mist = humidistat OR (mist_window AND NOT hum_trigger)
+```
+
+Each window runs the Mister at a fixed time of day regardless of where
+humidity currently sits — a deliberate spike on top of the reactive
+humidistat, which through 0.27.0 was the only thing driving that outlet.
+There is no day/night concept in this rule to special-case: a night-time
+spike is a window that wraps past midnight, expressed like any other.
+
+**Not a new role.** `outlet_roles` is unchanged and `outlet_mask` doesn't
+change structurally — this is the existing `"Mister"` outlet gaining a
+second input, not a new role label to match.
+
+Properties to get right — the four the firmware handoff calls out, plus one
+about `hum_trigger` that its formula implies but doesn't spell out:
+
+- **It is purely additive**, like fan assist (§5a). A window can only turn
+  the mister *on*; it never cuts short a mist the humidistat already wants.
+  A device with an empty `mister_ranges` computes identically to 0.27.0.
+- **The humidity ceiling overrides it.** This is the one place it departs
+  from fan assist, which is unconditionally additive: a scheduled spike into
+  an already-saturated enclosure is suppressed — the direct analogue of the
+  too-hot cutout suppressing a basking window (§8). Both halves of the
+  formula are ceiling-gated, so at or above `hum_high` the mister is off
+  whatever the schedule says.
+- **`hum_trigger` is §5's existing latch, not a fresh comparison.** It is
+  the same boolean the vent fan reacts to, and it carries hysteresis: it
+  stays ON until `hum < hum_high - 3.0`. So the schedule half is suppressed
+  across a **wider** band than the humidistat's own instantaneous
+  `hum >= hum_high` ceiling. Re-deriving it as `hum >= hum_high` re-opens a
+  scheduled spike partway down the fan's dead band, while the real device
+  keeps it shut.
+- **The `fan` key on these windows is always `false` and must not feed
+  `fan_assist`** — see §5a.
+- **It needs a synced clock**, like every schedule term (§9). Without one
+  the term is false and the mister runs on the humidistat alone — so a
+  just-booted device is *less* on than a naive recompute expects, never
+  more.
+
+Reading the array:
+
+- **An absent key means `[]`.** Devices without the feature emit no
+  `mister_ranges` at all — which today is every device but one bench unit
+  (see the end of this section) — and the humidistat-only formula stays
+  correct for them: no version gating, same key-presence feature detection
+  as §6.
+- Absent and `[]` are therefore indistinguishable in effect, and that's
+  fine. They differ in *meaning* ("firmware predates the feature" vs. "the
+  keeper scheduled no spikes"), which only matters if you want to surface
+  the feature's availability in the UI.
+- **There is no scalar first-window companion** — no `mister_on`/
+  `mister_off`. The scalars on the other three arrays exist only to keep
+  pre-multi-window validators working; nothing ever read a mister schedule,
+  so there's no back-compat surface to preserve and §6's first-window trap
+  has no analogue here. Read `mister_ranges` or nothing.
+- Windows are unsorted and may overlap, same as §6. The lighting arrays cap
+  at three; the handoff states no cap for this one, so treat the length as
+  unbounded rather than assuming three.
+
+**Why this needs attention, and why it's less urgent than §5a's.** A
+validator still on the humidistat-only formula sees the Mister ON with
+`humidistat` OFF and flags a stuck relay — structurally the same false
+positive as the fan-assist trap. The difference is blast radius: basking
+windows are `fan`-ticked by default, so §5a's trap fires on ordinary
+out-of-the-box devices, whereas **all mister windows ship unused**, because
+misting has always been purely reactive and an upgrading device has to keep
+behaving exactly as it did. So this only fires on a device where a keeper
+has actually gone and scheduled a spike — real, but self-inflicted per
+device rather than fleet-wide on upgrade.
+
+This repo computes only the `humidistat` term (the schedule half needs the
+same local clock that blocks §6-8), so `src/lib/automation.ts`'s
+`decision.mist` is now a **lower bound** — see the comment on
+`ClimateDecision` before building any mister check on it.
+
+**This section is unreleased — but one device is already emitting the key.**
+0.28.0 is not cut: the firmware team reports `FIRMWARE_VERSION` still reading
+`0.27.0`, no tag, and the changelog entry sitting under `[Unreleased]`, and
+concluded from that no device can be sending `mister_ranges` yet. Our own
+`devices` rows say otherwise. As of 2026-08-31 `hs-2e5540` ("ZRD Test Unit")
+reports `fw_version = 0.27.0` and carries `"mister_ranges": []`, while the
+other two 0.27.0 devices have no such key — a bench unit running an
+unreleased build whose version string hasn't been bumped. That unit has
+`enabled = false` and an empty `outlet_roles`, so it isn't actuating
+anything; only its config snapshot is interesting.
+
+Three consequences:
+
+- **`fw_version` cannot gate this feature at all.** The device with the key
+  and the two without report the *identical* version string. Key presence
+  isn't merely the better signal here, as it is in §6 — it's the only signal
+  that exists. `misterWindows()` in `src/lib/schedule.ts` already reads it
+  that way, and this is precisely the case a version check would have gotten
+  wrong.
+- **Two of the claims above are now confirmed against a real row**: the
+  array ships **empty**, which is what an upgrading device needs in order to
+  keep behaving exactly as it did, and there is **no** `mister_on`/
+  `mister_off` scalar companion.
+- **The window shape itself is still unobserved.** Nothing anywhere has a
+  *populated* `mister_ranges`, so the `{"on", "off", "fan"}` triple in the
+  JSON above stays code-inspected. Treat the formula as the spec — it
+  matches the firmware's own §4a and its shipped source — but confirm the
+  wire format against a real heartbeat before building the §11 mister
+  anomaly rules on it. The firmware team will send an observed row once
+  0.28.0 is flashed.
 
 ## 5. Fan (safety-ceiling vent, plus fan assist)
 
@@ -156,6 +282,17 @@ fan_assist = ANY(r.fan AND in_window(now_local, r.on, r.off)
                  for r in day_light_ranges + uvb_ranges + basking_ranges)
 ```
 
+**The fold is over those three arrays only.** `mister_ranges` (§4a) reuses
+the same window shape and serialises a `fan` key too — always `false`,
+because the device never offers that checkbox there and venting mid-spike
+would fight the thing the window exists to do. It is in the JSON purely
+because `mister_ranges` reuses the lighting windows' writer. A `fan_assist`
+reducer that folds over "every `*_ranges` array" generically rather than
+naming the three lights **is a bug as of 0.28.0** — it stays quiet only for
+as long as that key stays false. `src/lib/schedule.ts` keeps the mister out
+of its `LightRole` union for exactly this reason, and `misterWindows()`
+returns a type with no `fan` field at all.
+
 Firmware writes `fan` on every window, defaulting **true on basking
 windows** and false elsewhere. That default is applied when the window is
 written, not something a reader should re-derive — an absent flag is
@@ -177,7 +314,7 @@ generation of firmware, not merely a safe default. Never infer `fan` from
 `*_ranges` being present — detect on the flag itself, exactly as §6 detects
 multi-window on the array key.
 
-Three things about that middle row worth knowing:
+Two things about that middle row worth knowing:
 
 - **Nothing ever reported `fw_version = 0.25.0`.** That version was never
   committed, tagged, or built for OTA — its *contents* shipped as 0.26.0.
@@ -384,6 +521,7 @@ whether an apparent mismatch is just normal lag vs. a real bug:
 | Heater/Mister/Fan re-evaluation | 30s |
 | Day Light/UVB/Basking schedule re-check | 15s |
 | Fan assist re-evaluation (§5a) | 30s |
+| Scheduled mist window re-evaluation (§4a) | 30s |
 | Telemetry sample shipped | 60s |
 | Heartbeat (`devices` upsert, `profile_config` snapshot) | 5 min |
 
@@ -394,7 +532,10 @@ multiple consecutive telemetry samples**.
 
 Fan assist is written on the climate interval, not the faster schedule
 one, so expect up to ~30s of lag at a ticked window's boundary — longer
-than the lights' own 15s, on the same edge.
+than the lights' own 15s, on the same edge. A scheduled mist window (§4a)
+is on the same interval for the same reason: up to ~30s at either edge of a
+window, which for a 15-minute spike is a real fraction of its length. Don't
+flag it.
 
 ## 11. Anomaly conditions worth flagging
 
@@ -430,6 +571,30 @@ config says it should":
   unticked — and needs no clock to determine. Where a ticked window does exist, skip the check
   until fan assist is actually computed rather than reporting a mismatch
   you know to be spurious.
+- Mister `outlet_mask` bit is ON while the recomputed `humidistat` is OFF
+  for a sustained stretch — the humidity-side sibling of the Fan bullet
+  above, and **only valid against both terms** (§4a): the humidistat alone
+  reports a stuck relay for the whole duration of any open mist window.
+
+  Gate it on the snapshot rather than a version, exactly as with the fan —
+  the one-term formula is exact whenever `mister_ranges` is absent or empty,
+  because `mist_window` is then false at every instant, and that needs no
+  clock to determine. Unlike the fan's gate this still covers most of the
+  fleet *after* upgrading, since mister windows ship unused; where a device
+  does have one, skip the check until the schedule half is actually computed
+  rather than reporting a mismatch you know to be spurious.
+- Mister `outlet_mask` bit is ON while the recomputed `hum_trigger` is
+  active — the humidity-side twin of the UVB/Basking too-hot check below:
+  the ceiling override isn't taking effect. This one needs no clock and no
+  window gate, because the ceiling suppresses **both** halves of §4a's
+  formula — no schedule can make it legal.
+
+  One profile shape breaks that, though: where `hum_high - hum_low < 3.0`,
+  humidity can fall below `hum_low` while `hum_trigger` is still latched
+  (its release point, `hum_high - 3.0`, sits *below* `hum_low` there), which
+  legitimately turns the humidistat half back on with the latch active.
+  Check the band's width against the 3.0 %RH hysteresis before flagging a
+  narrow profile.
 - UVB or Basking Spot `outlet_mask` bit is ON while the recomputed
   `temp_trigger` is active — the forced-off override isn't taking effect
   (possible bug or pre-override firmware version). The check is identical

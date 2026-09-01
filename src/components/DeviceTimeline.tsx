@@ -18,7 +18,7 @@ import { deriveHealthEvents, findTelemetryGaps, mergeTimelineEntries, type Timel
 import { msSinceDeviceBoot, OUTLET_MISMATCH_DEBOUNCE_SAMPLES, STALE_AFTER_MS } from '@/lib/queries';
 import type { Device, LogLevel, LogRow, LogTag, ProfileConfig, OutletAlertRow } from '@/lib/types';
 import { celsiusDeltaToFahrenheit, celsiusToFahrenheit, tempRangeC } from '@/lib/units';
-import { lightWindows, type LightRole } from '@/lib/schedule';
+import { lightWindows, misterWindows, type LightRole } from '@/lib/schedule';
 import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
 import { GAUGE_COLORS } from '@/lib/gaugeColors';
 import { closeOutletAlert, escalateOutletAlert } from '@/app/devices/[deviceId]/actions';
@@ -332,6 +332,12 @@ const LIGHT_SCHEDULE_ROWS: { role: LightRole; label: string }[] = [
 // species profile itself and its light/UVB schedule — shown once alongside
 // the reading cards rather than repeated per-card.
 function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null }) {
+  // Scheduled mist windows (firmware 0.28.0+, docs/automation-rules.md §4a)
+  // belong next to the light schedules rather than with the humidity target:
+  // they're a fixed time-of-day window that fires regardless of humidity, so
+  // reading them as part of the humidistat's settings would be misleading.
+  const mistWindows = misterWindows(profileConfig) ?? [];
+
   return (
     <details className="group rounded-xl bg-device-surface">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 text-device-text">
@@ -365,6 +371,22 @@ function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null
                 </div>
               );
             })}
+            {/* Shown only when at least one window exists. Absent and `[]`
+                are indistinguishable here (see misterWindows) — a "Not
+                scheduled" row would state the keeper's choice for the entire
+                pre-0.28.0 fleet, where the feature doesn't exist at all.
+                That's the opposite call from Basking Spot above, where
+                lightWindows() *can* tell the two apart. */}
+            {mistWindows.length > 0 && (
+              <div>
+                <p className="text-[0.75em] text-device-text-tertiary">Mister (scheduled spikes)</p>
+                {mistWindows.map((range, index) => (
+                  <p key={index} className="text-[0.85em] text-device-text">
+                    {range.on} – {range.off}
+                  </p>
+                ))}
+              </div>
+            )}
           </div>
           <div>
             <p className="text-[0.75em] text-device-text-tertiary">Timezone</p>

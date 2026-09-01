@@ -15,9 +15,12 @@
 // them — testing only the first window is the §6 trap that produces
 // confident-looking false anomalies.
 //
-// That same missing clock is why the Fan rule below is incomplete as of
-// firmware 0.27.0: fan assist (§5a) adds a third term driven by those same
-// windows, so `decision.fan` is the climate half alone. See its comment.
+// That same missing clock is why two of the rules below are incomplete:
+// fan assist (§5a) adds a third term to the Fan as of firmware 0.27.0, the
+// current release, and scheduled mist windows (§4a) add a second term to
+// the Mister in 0.28.0, which isn't cut yet — both driven by clock windows.
+// So `decision.fan` and `decision.mist` are each the climate half alone.
+// See their comments.
 
 export const TEMP_HYSTERESIS_C = 1.0;
 export const HUMIDITY_HYSTERESIS_PCT = 3.0;
@@ -47,6 +50,29 @@ export const INITIAL_CLIMATE_STATE: ClimateState = {
 
 export type ClimateDecision = {
   heat: boolean;
+  // The HUMIDISTAT half of the Mister rule only (automation-rules.md §4).
+  // Firmware 0.28.0 adds a second term, a scheduled mist window (§4a): a
+  // window in `mister_ranges` runs the Mister at a fixed time of day
+  // regardless of humidity, on top of the reactive humidistat —
+  // `humidistat OR (mist_window AND NOT hum_trigger)`. Computing it needs
+  // the device's local time, the same thing blocking §6-8, so this field is
+  // a LOWER BOUND on the mister's real state.
+  //
+  // It's exact wherever the snapshot's `mister_ranges` is absent or empty
+  // (misterWindows() reads both as []) — `mist_window` is false at every
+  // instant then, and it needs no clock to check. That, not a version
+  // comparison, is the gate for the §11 mister anomaly check. Today that
+  // gate covers the entire fleet, since 0.28.0 isn't cut and no device
+  // emits the key at all; unlike fan assist's gate it will still cover most
+  // of the fleet after the upgrade lands, because mister windows ship
+  // unused. Against a snapshot that does carry one, though, this field
+  // reports a stuck relay on a correctly-behaving device.
+  //
+  // Note the suppression term is `hum_trigger` — the §5 latch computed
+  // below, with its 3.0 %RH release band — not a fresh `hum >= hum_high`
+  // comparison. The latch's band is wider, so re-deriving the ceiling
+  // instantaneously would re-open a scheduled spike partway down the fan's
+  // dead band while the real device keeps it shut.
   mist: boolean;
   // The CLIMATE half of the Fan rule only — `temp_trigger OR hum_trigger`.
   // Firmware 0.27.0 added a third term, fan assist (automation-rules.md
@@ -107,7 +133,11 @@ export function evaluateClimateStep(
     heat = false;
   }
 
-  // Mister (§4): same shape, humidity-flavored.
+  // Mister (§4): same shape, humidity-flavored. This is §4a's `humidistat`
+  // boolean — the whole rule on every deployed firmware to date, and one of
+  // two terms once 0.28.0 ships (see `mist` on ClimateDecision). Its
+  // ceiling here is instantaneous; the schedule term's is the `humTrigger`
+  // latch computed further down.
   let mist = state.mist;
   if (hum >= profile.humidityHigh) {
     mist = false;

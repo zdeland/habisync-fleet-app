@@ -1,4 +1,4 @@
-import type { LightWindow, ProfileConfig } from '@/lib/types';
+import type { LightWindow, MisterWindow, ProfileConfig } from '@/lib/types';
 
 // Firmware 0.26.0 gave each light up to three independent daily windows
 // (docs/automation-rules.md §6). The old scalar pairs still ship, but they
@@ -7,6 +7,11 @@ import type { LightWindow, ProfileConfig } from '@/lib/types';
 // computes "should be off" straight through them. This module is the only
 // place that should touch those fields; everything else calls lightWindows().
 
+// The three scheduled lights, and deliberately nothing else. `mister_ranges`
+// (docs/automation-rules.md §4a) is the same window shape but is NOT a
+// LightRole: fan assist folds over exactly these three (§5a), and mister
+// windows carry an always-false `fan` key that must not join that fold.
+// Read those through misterWindows() below instead.
 export type LightRole = 'day_light' | 'uvb' | 'basking';
 
 const SCALARS: Record<LightRole, { on: keyof ProfileConfig; off: keyof ProfileConfig }> = {
@@ -63,4 +68,30 @@ export function lightWindows(profileConfig: ProfileConfig | null, role: LightRol
   if (onTime === offTime) return [];
 
   return [{ on: onTime, off: offTime }];
+}
+
+/**
+ * The scheduled mist windows to be OR'd over for §4a's `mist_window` term.
+ *
+ * `null` means this snapshot says nothing at all (no config). Everything
+ * else is a list, `[]` included: an absent `mister_ranges` key is a
+ * pre-0.28.0 device, and §4a specifies that as `[]` rather than "unknown"
+ * — the humidistat-only formula is exactly right there, so no version gate
+ * and no scalar fallback (none exists) are needed. That does make "firmware
+ * predates the feature" and "the keeper scheduled no spikes" indistinguish-
+ * able, which is fine for the decision logic and worth remembering before
+ * rendering either as a definite statement about the device.
+ *
+ * Windows are unnormalized, exactly like the lighting ones — unsorted,
+ * possibly overlapping, possibly wrapping past midnight.
+ *
+ * The returned windows deliberately have no `fan` field even though one is
+ * on the wire: see MisterWindow in src/lib/types.ts.
+ */
+export function misterWindows(profileConfig: ProfileConfig | null): MisterWindow[] | null {
+  if (!profileConfig) return null;
+
+  // Key presence, not devices.fw_version — same reasoning as lightWindows().
+  const ranges = profileConfig.mister_ranges;
+  return Array.isArray(ranges) ? ranges : [];
 }

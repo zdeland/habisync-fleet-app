@@ -44,6 +44,23 @@ export type LightWindow = {
   fan?: boolean;
 };
 
+// One scheduled mist window from `mister_ranges` (firmware 0.28.0+,
+// docs/automation-rules.md §4a). Same wire shape and same in_window rule as
+// LightWindow — firmware reuses the lighting windows' writer — driving a
+// fixed-time-of-day spike of the Mister outlet on top of the humidistat.
+//
+// The `fan` key IS present on the wire here and is deliberately absent from
+// this type: it is always false (the device never offers that checkbox for
+// the mister, and venting mid-spike would fight the thing the window exists
+// to do), so it must never reach fan assist, which folds over the three
+// lighting arrays only (§5a). Leaving the field out means `r.fan` doesn't
+// compile against a mister window rather than silently contributing a term
+// that is only false for as long as firmware keeps writing it that way.
+export type MisterWindow = {
+  on: string;
+  off: string;
+};
+
 // Firmware 0.5.0 switched the wire format from Fahrenheit to Celsius
 // (temp_low_f/temp_high_f -> temp_low_c/temp_high_c — see
 // docs/known-issues.md). profile_config is a JSONB blob that only gets
@@ -79,6 +96,14 @@ export type ProfileConfig = {
   day_light_ranges?: LightWindow[];
   uvb_ranges?: LightWindow[];
   basking_ranges?: LightWindow[];
+  // Firmware 0.28.0+ (§4a). No scalar first-window companion exists — and
+  // shouldn't be invented: the other three arrays' scalars are back-compat
+  // for pre-multi-window validators, and nothing ever read a mister
+  // schedule. Absent (every pre-0.28.0 device, and every historized
+  // tag='config' row written before its upgrade) means the same thing as
+  // `[]` in the formula: humidistat only. Read via
+  // src/lib/schedule.ts's misterWindows().
+  mister_ranges?: MisterWindow[];
   timezone: string;
   ota_url: string;
   kasa_ip?: string;
