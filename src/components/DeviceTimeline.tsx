@@ -18,7 +18,8 @@ import { deriveHealthEvents, findTelemetryGaps, mergeTimelineEntries, type Timel
 import { msSinceDeviceBoot, OUTLET_MISMATCH_DEBOUNCE_SAMPLES, STALE_AFTER_MS } from '@/lib/queries';
 import type { Device, LogLevel, LogRow, LogTag, ProfileConfig, OutletAlertRow } from '@/lib/types';
 import { celsiusDeltaToFahrenheit, celsiusToFahrenheit, tempRangeC } from '@/lib/units';
-import { lightWindows, misterWindows, type LightRole } from '@/lib/schedule';
+import { isMisterDurationWindow, lightWindows, misterWindows, type LightRole } from '@/lib/schedule';
+import { isTestReason, reasonOnly } from '@/lib/logReasons';
 import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
 import { GAUGE_COLORS } from '@/lib/gaugeColors';
 import { closeOutletAlert, escalateOutletAlert } from '@/app/devices/[deviceId]/actions';
@@ -97,25 +98,6 @@ function formatTime(ms: number) {
 // device_time is what a user would've seen on-device at the time.
 function displayTime(iso: string, deviceTime: string | null) {
   return formatTime(new Date(deviceTime ?? iso).getTime());
-}
-
-// Outlet transition messages read "Heater [1] turned ON — temperature below
-// target range" — keep only the reason after the dash for the compact
-// per-outlet display, drop the "what turned on/off" part (already shown by
-// the icon + ON/OFF label right above it).
-function reasonOnly(message: string) {
-  const match = message.match(/[-—]\s*(.*)$/);
-  return match ? match[1] : message;
-}
-
-// The device dashboard's /climate-test page drives the real
-// ClimateController and real outlets — it's not a sandbox — so a
-// test-triggered transition logs through the exact same tag='event' path
-// as a real one. The only distinguishing signal is this "test: " prefix
-// on the reason (see docs/known-issues.md); render it distinctly so it's
-// never mistaken for a real climate-triggered decision.
-function isTestReason(reason: string) {
-  return reasonOnly(reason).trim().toLowerCase().startsWith('test:');
 }
 
 // Colors the reason badge by what triggered the transition — reuses the
@@ -317,11 +299,12 @@ function ReadingCard({
   );
 }
 
-// Firmware 0.26.0 gives each light up to three windows, so a row is a list
-// rather than one on/off pair. Basking Spot is omitted entirely (not shown
-// as empty) on a pre-0.26.0 snapshot, where lightWindows() returns null —
-// the role genuinely doesn't exist there, which is different from existing
-// with nothing scheduled.
+// Firmware 0.26.0 gives each light several windows, so a row is a list
+// rather than one on/off pair — however many lightWindows() hands back, not
+// a fixed count (the per-light caps differ and move between releases).
+// Basking Spot is omitted entirely (not shown as empty) on a pre-0.26.0
+// snapshot, where lightWindows() returns null — the role genuinely doesn't
+// exist there, which is different from existing with nothing scheduled.
 const LIGHT_SCHEDULE_ROWS: { role: LightRole; label: string }[] = [
   { role: 'day_light', label: 'Day Light' },
   { role: 'uvb', label: 'UVB' },
@@ -336,6 +319,15 @@ function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null
   // belong next to the light schedules rather than with the humidity target:
   // they're a fixed time-of-day window that fires regardless of humidity, so
   // reading them as part of the humidistat's settings would be misleading.
+  //
+  // They render in two visibly different forms on purpose — "07:30 for 15s"
+  // for 0.29.0+'s start-plus-duration, "07:30 – 07:45" for a 0.28.0 snapshot
+  // — rather than normalizing the old shape into the new one. Both shapes are
+  // live and a device's own config history contains both (§4a), so which one
+  // a snapshot used is a real fact about that snapshot. Showing the 0.28.0
+  // pair as a computed "for 900s" would also be a lie about the device: the
+  // upgrade caps a migrated duration at 300s, so the span that row records is
+  // not the spike the upgraded device now runs.
   const mistWindows = misterWindows(profileConfig) ?? [];
 
   return (
@@ -382,7 +374,7 @@ function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null
                 <p className="text-[0.75em] text-device-text-tertiary">Mister (scheduled spikes)</p>
                 {mistWindows.map((range, index) => (
                   <p key={index} className="text-[0.85em] text-device-text">
-                    {range.on} – {range.off}
+                    {isMisterDurationWindow(range) ? `${range.on} for ${range.duration_s}s` : `${range.on} – ${range.off}`}
                   </p>
                 ))}
               </div>
@@ -1120,7 +1112,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
             {outlet.reason &&
               (isTestReason(outlet.reason) ? (
                 <div
-                  title="Triggered by the device's /climate-test page, not a real sensor reading"
+                  title="Triggered by hand from the device's dashboard, not by an automation decision"
                   className={`rounded px-2 py-0.5 text-center text-[0.7em] font-mono font-semibold ${GAUGE_COLORS.neutral.badgeClassName}`}
                 >
                   🧪 TEST
@@ -1195,7 +1187,7 @@ function EventLog({ data, entries }: { data: DeviceTimelineData; entries: Timeli
                       <span>{row.message}</span>
                       {isTest && (
                         <span
-                          title="Triggered by the device's /climate-test page — a real outlet change, but not driven by an actual sensor reading"
+                          title="Triggered by hand from the device's dashboard — a real outlet change, but not an automation decision"
                           className={`rounded px-1.5 py-0.5 text-[0.7em] font-mono font-semibold ${GAUGE_COLORS.neutral.badgeClassName}`}
                         >
                           TEST

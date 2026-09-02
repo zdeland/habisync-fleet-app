@@ -41,8 +41,9 @@ Per device, per instant:
   in effect at that instant, per the webapp plan §3) — `enabled`,
   `temp_low_c`, `temp_high_c`, `hum_low`, `hum_high`, `day_light_ranges`,
   `uvb_ranges`, `basking_ranges` (each window carrying `on`, `off` and the
-  `fan` assist flag of §5a), `mister_ranges` (the same window shape, but its
-  `fan` key is inert — §4a), `timezone`. Same firmware-version caveat
+  `fan` assist flag of §5a), `mister_ranges` (**not** the same window shape
+  since 0.29.0 — `on` plus `duration_s` in seconds, and no `fan`; §4a-i),
+  `timezone`. Same firmware-version caveat
   in both directions — older snapshots carry `temp_low_f`/`temp_high_f`
   instead of the Celsius pair, and carry the single-window scalars
   (`day_light_on`/`day_light_off`, `uvb_on`/`uvb_off`) instead of the
@@ -72,6 +73,11 @@ Per device, per instant:
   which meant re-deriving a 1.8°F hysteresis band on every comparison.)
 - **Humidity needs no conversion** — %RH on-device and in every shipped
   field, unchanged by the above.
+- **Clock resolution is not uniform.** Every schedule rule in this document
+  compares at **minute** resolution except one: a 0.29.0+ mister window is a
+  start plus `duration_s` **seconds**, as short as 5 (§4a-i). Evaluate that
+  one at minute resolution and a 5-second spike computes as never on or a
+  full minute on. `duration_s` is seconds, never minutes.
 - **Timezone is the sharpest remaining edge case.** `profile_config.timezone` is
   either a human-readable label from a fixed list (`"Eastern Time (New
   York)"`, `"Pacific Time (Los Angeles)"`, etc. — see `NAMED_TIMEZONES` in
@@ -112,29 +118,23 @@ elif mist == ON  and hum >= hum_low + 3.0: mist = OFF
 else:                                     mist = <unchanged>
 ```
 
-Call that boolean `humidistat`. It is the entire rule on every deployed
-firmware to date, and is unchanged by what follows — same thresholds, same
-3.0 %RH hysteresis, same ceiling. In 0.28.0, which is **not yet released**
-(see the end of §4a), it becomes **one of two terms**.
+Call that boolean `humidistat`. It was the entire rule through 0.27.0, and
+is unchanged by everything that follows — same thresholds, same 3.0 %RH
+hysteresis, same ceiling. Since 0.28.0 it is **one of two terms**.
 
-### 4a. Scheduled mist windows (firmware 0.28.0 — unreleased)
+### 4a. Scheduled mist windows (firmware 0.28.0+)
 
-`profile_config` gains a fourth ranges array, in exactly the shape the three
-lighting arrays use (§6), read with the same `in_window` — midnight-crossing
-windows included:
-
-```json
-"mister_ranges": [{"on": "07:30", "off": "07:45", "fan": false},
-                  {"on": "21:00", "off": "21:10", "fan": false}]
-```
+`profile_config` gains a fourth ranges array. **It has two wire shapes**, and
+which one a snapshot uses is decided per window, on key presence — see 4a-i
+below. The outer formula is the same under both:
 
 ```
-mist_window = ANY(in_window(now_local, r.on, r.off) for r in mister_ranges)
-
 mist = humidistat OR (mist_window AND NOT hum_trigger)
+
+mist_window = ANY(span_open(r) for r in mister_ranges)
 ```
 
-Each window runs the Mister at a fixed time of day regardless of where
+Each window spikes the Mister at a fixed time of day regardless of where
 humidity currently sits — a deliberate spike on top of the reactive
 humidistat, which through 0.27.0 was the only thing driving that outlet.
 There is no day/night concept in this rule to special-case: a night-time
@@ -163,8 +163,11 @@ about `hum_trigger` that its formula implies but doesn't spell out:
   `hum >= hum_high` ceiling. Re-deriving it as `hum >= hum_high` re-opens a
   scheduled spike partway down the fan's dead band, while the real device
   keeps it shut.
-- **The `fan` key on these windows is always `false` and must not feed
-  `fan_assist`** — see §5a.
+- **No mister window ever feeds `fan_assist`** — see §5a. 0.28.0 writes a
+  `fan` key here and it is always `false`; 0.29.0 dropped the key from this
+  array outright. The rule is the same either way, and neither shape's key
+  is represented in `MisterWindow` (`src/lib/types.ts`) so that `w.fan`
+  fails to compile rather than quietly contributing a term.
 - **It needs a synced clock**, like every schedule term (§9). Without one
   the term is false and the mister runs on the humidistat alone — so a
   just-booted device is *less* on than a naive recompute expects, never
@@ -172,11 +175,13 @@ about `hum_trigger` that its formula implies but doesn't spell out:
 
 Reading the array:
 
-- **An absent key means `[]`.** Devices without the feature emit no
-  `mister_ranges` at all — which today is every device but one bench unit
-  (see the end of this section) — and the humidistat-only formula stays
-  correct for them: no version gating, same key-presence feature detection
-  as §6.
+- **An absent key means `[]`.** Pre-0.28.0 devices emit no `mister_ranges`
+  at all, and the humidistat-only formula stays correct for them: no version
+  gating, same key-presence feature detection as §6. Note this is a
+  *second*, outer key-presence check — whether the array exists — layered
+  over §4a-i's per-window one. They are independent: an array can exist and
+  be empty, and a device that emits the array tells you nothing about which
+  window shape it writes.
 - Absent and `[]` are therefore indistinguishable in effect, and that's
   fine. They differ in *meaning* ("firmware predates the feature" vs. "the
   keeper scheduled no spikes"), which only matters if you want to surface
@@ -186,9 +191,9 @@ Reading the array:
   pre-multi-window validators working; nothing ever read a mister schedule,
   so there's no back-compat surface to preserve and §6's first-window trap
   has no analogue here. Read `mister_ranges` or nothing.
-- Windows are unsorted and may overlap, same as §6. The lighting arrays cap
-  at three; the handoff states no cap for this one, so treat the length as
-  unbounded rather than assuming three.
+- Windows are unsorted and may overlap, same as §6. Its cap has since moved
+  to five, and the lighting arrays' caps are now neither three nor equal to
+  each other — see §6a, and don't encode any of those numbers.
 
 **Why this needs attention, and why it's less urgent than §5a's.** A
 validator still on the humidistat-only formula sees the Mister ON with
@@ -206,36 +211,98 @@ same local clock that blocks §6-8), so `src/lib/automation.ts`'s
 `decision.mist` is now a **lower bound** — see the comment on
 `ClimateDecision` before building any mister check on it.
 
-**This section is unreleased — but one device is already emitting the key.**
-0.28.0 is not cut: the firmware team reports `FIRMWARE_VERSION` still reading
-`0.27.0`, no tag, and the changelog entry sitting under `[Unreleased]`, and
-concluded from that no device can be sending `mister_ranges` yet. Our own
-`devices` rows say otherwise. As of 2026-08-31 `hs-2e5540` ("ZRD Test Unit")
-reports `fw_version = 0.27.0` and carries `"mister_ranges": []`, while the
-other two 0.27.0 devices have no such key — a bench unit running an
-unreleased build whose version string hasn't been bumped. That unit has
-`enabled = false` and an empty `outlet_roles`, so it isn't actuating
-anything; only its config snapshot is interesting.
+#### 4a-i. Two shapes: fork per window on `duration_s`
 
-Three consequences:
+0.28.0 reused the lighting windows' writer verbatim, and that was the wrong
+shape for a mister. **0.29.0, published the day after, replaced it.**
 
-- **`fw_version` cannot gate this feature at all.** The device with the key
-  and the two without report the *identical* version string. Key presence
-  isn't merely the better signal here, as it is in §6 — it's the only signal
-  that exists. `misterWindows()` in `src/lib/schedule.ts` already reads it
-  that way, and this is precisely the case a version check would have gotten
-  wrong.
-- **Two of the claims above are now confirmed against a real row**: the
-  array ships **empty**, which is what an upgrading device needs in order to
-  keep behaving exactly as it did, and there is **no** `mister_on`/
-  `mister_off` scalar companion.
-- **The window shape itself is still unobserved.** Nothing anywhere has a
-  *populated* `mister_ranges`, so the `{"on", "off", "fan"}` triple in the
-  JSON above stays code-inspected. Treat the formula as the spec — it
-  matches the firmware's own §4a and its shipped source — but confirm the
-  wire format against a real heartbeat before building the §11 mister
-  anomaly rules on it. The firmware team will send an observed row once
-  0.28.0 is flashed.
+```json
+"mister_ranges": [{"on": "07:30", "off": "07:45", "fan": false}]   // 0.28.0
+"mister_ranges": [{"on": "07:30", "duration_s": 15}]               // 0.29.0+
+```
+
+Why it had to change: a pair of minute-resolution clock times cannot
+express anything shorter than **60 seconds of water**, which is far more
+than a humidity spike wants — and 0.28.0 only re-evaluated the mister every
+30s, so even 60s was not reliably executable. 0.29.0 stores a duration in
+5-second increments and ticks fast enough to honour it (§10).
+
+`duration_s` is **seconds** — always a multiple of 5, between 5 and 300.
+
+```
+for r in mister_ranges:
+    if "duration_s" in r:
+        span_open(r) = ((now_local_seconds - to_seconds(r.on)) mod 86400) < r.duration_s
+    else:
+        span_open(r) = in_window(now_local, r.on, r.off)   # 0.28.0 rows only
+```
+
+**Discriminate on the key, never on `fw_version`.**
+
+| Window carries | Shape | Emitted by |
+|---|---|---|
+| `duration_s` | start + duration | 0.29.0+ |
+| `off` | on/off pair | 0.28.0 only |
+
+This is **permanent, not transitional**. The 0.28.0-emitting population is
+small — one day of releases, windows unused by default — but historized
+`tag='config'` rows keep whatever shape they were written under, so a
+device that went through the upgrade carries a stripe of old-shape rows in
+its own history forever. Version-gating a historical check against that
+device's *current* version reads the wrong branch for the stripe, exactly
+as in §6.
+
+`isMisterDurationWindow()` in `src/lib/schedule.ts` is the single place
+this repo makes the decision.
+
+**Seconds resolution is mandatory for the duration form.** Every other rule
+in this document compares at minute resolution. Do that here and a 5-second
+spike computes as either never on or a full minute on — both wrong, and the
+second one wrong in the direction that manufactures anomalies. Whatever
+eventually resolves the device's local time (the blocker in §6-8) must not
+round to the minute on the way.
+
+**Upgrading rewrites a keeper's spike lengths.** A 0.28.0 device migrating
+to 0.29.0 converts in place: the old on-time becomes the start, and the old
+span becomes the duration **capped at 300s**. A keeper who set a 15-minute
+window in 0.28.0 gets a 5-minute one. That is device behavior, not wire
+format — but it means a device's reported spike length can change across
+the upgrade with nobody having edited it, and it is why the UI renders a
+0.28.0 pair as a pair rather than normalizing it into a duration it no
+longer runs.
+
+#### 4a-ii. What is actually confirmed
+
+Both shapes above are **code-inspected, not observed.** This has now been
+outstanding across four firmware handoffs and is the one thing still owed
+to us: nobody has captured a `profile_config` row containing a *populated*
+`mister_ranges` in either form.
+
+What we do have:
+
+- **An observed empty array.** On 2026-08-31 `hs-2e5540` ("ZRD Test Unit")
+  carried `"mister_ranges": []` while reporting `fw_version = 0.27.0`, and
+  the other two 0.27.0 devices had no such key at all. So the array does
+  ship **empty** — what an upgrading device needs in order to keep behaving
+  exactly as it did — and there is **no** `mister_on`/`mister_off` scalar
+  companion.
+- **Proof that `fw_version` cannot gate this feature.** The device with the
+  key and the two without reported the *identical* version string; that
+  bench unit was running an unreleased build whose version had not been
+  bumped. Key presence isn't merely the better signal here as it is in §6,
+  it is the only signal that exists — and this is precisely the case a
+  version check would have gotten wrong. It is also why §4a-i's per-window
+  fork is on key presence and not on a release number.
+- **Observed `logs` rows for real spikes**, scheduled and manual, with the
+  durations in §10a. So the scheduled path demonstrably works end to end on
+  a device even though the config snapshot that drives it has never been
+  captured.
+
+What that leaves: treat §4a-i's formula and both JSON shapes as the spec —
+they match the firmware's own §4a and its shipped source — but **confirm
+the wire format against a real snapshot before building the §11 mister
+anomaly rules on it.** Not confirmed either: the 0.28.0 → 0.29.0 NVS
+migration described above, and the Kasa backend's spike timing (§10a).
 
 ## 5. Fan (safety-ceiling vent, plus fan assist)
 
@@ -282,16 +349,27 @@ fan_assist = ANY(r.fan AND in_window(now_local, r.on, r.off)
                  for r in day_light_ranges + uvb_ranges + basking_ranges)
 ```
 
-**The fold is over those three arrays only.** `mister_ranges` (§4a) reuses
-the same window shape and serialises a `fan` key too — always `false`,
-because the device never offers that checkbox there and venting mid-spike
-would fight the thing the window exists to do. It is in the JSON purely
-because `mister_ranges` reuses the lighting windows' writer. A `fan_assist`
-reducer that folds over "every `*_ranges` array" generically rather than
-naming the three lights **is a bug as of 0.28.0** — it stays quiet only for
-as long as that key stays false. `src/lib/schedule.ts` keeps the mister out
-of its `LightRole` union for exactly this reason, and `misterWindows()`
-returns a type with no `fan` field at all.
+**The fold is over those three arrays only.** A `fan_assist` reducer that
+folds over "every `*_ranges` array" generically rather than naming the three
+lights **is a bug as of 0.28.0**, and the history of `mister_ranges`'
+`fan` key is a good argument for why the generic version was never safe:
+
+- **0.28.0** serialised `fan` on mister windows too — always `false`,
+  because the device never offers that checkbox there and venting mid-spike
+  would fight the thing the window exists to do. It was in the JSON purely
+  because that release reused the lighting windows' writer. A generic
+  reducer stayed *quiet* here, and only because the key happened to be
+  false.
+- **0.29.0** dropped `fan` from the array entirely along with the rest of
+  the reshape (§4a-i), so a generic reducer now reads `undefined` there
+  instead. Also quiet, also by luck, and for a completely different reason
+  than before.
+
+Neither release ever made "fold over everything" correct — it made it
+*undetectable*, twice, which is worse. `src/lib/schedule.ts` keeps the
+mister out of its `LightRole` union for exactly this reason, and neither
+`MisterWindow` shape has a `fan` field at all, so `w.fan` fails to compile
+rather than silently contributing a term.
 
 Firmware writes `fan` on every window, defaulting **true on basking
 windows** and false elsewhere. That default is applied when the window is
@@ -376,7 +454,7 @@ day_light = ANY(in_window(now_local, r.on, r.off) for r in day_light_ranges)
 ```
 
 Firmware 0.26.0 replaced the single `day_light_on`/`day_light_off` pair
-with **up to three independent windows per day**, and did the same for UVB
+with **several independent windows per day**, and did the same for UVB
 (§7) and the new Basking Spot (§8). The light is on if `now_local` falls
 in *any* window:
 
@@ -390,6 +468,37 @@ in *any* window:
 Each window's `fan` flag is fan assist — it drives the **Fan** outlet, not
 the light's own, and is specified in §5a rather than here. It is absent
 entirely on a 0.26.0 snapshot (§5a's table).
+
+### 6a. How many windows — per array, and not stable
+
+Through 0.31.0 every one of these arrays allowed three. As of **0.32.0**
+the caps are per-array and differ:
+
+| Array | Max windows | Was |
+|---|---|---|
+| `day_light_ranges` | 2 | 3 |
+| `uvb_ranges` | 1 | 3 |
+| `basking_ranges` | 3 | 3 |
+| `mister_ranges` (§4a) | 5 | 3 |
+
+**Nothing should read these numbers.** They are here to explain what you
+will see in the data, not to be encoded anywhere. Iterating the array and
+OR-ing `in_window` across it — which is what this section has always
+specified — is correct under every one of these caps and under the next
+change to them. `src/lib/schedule.ts` is the only place that touches the
+arrays and does exactly that; the trap to avoid is a literal `3` appearing
+downstream of it.
+
+Unused windows have always been omitted, so **an array's length was never
+its cap** and a shorter array has never meant anything on its own.
+
+One consequence worth recognising before someone reports it as a fault: a
+device that had a now-removed window configured (Day Light 3, UVB 2-3)
+**stops running it** on upgrade. The value survives in the device's own
+storage but is no longer read, so its `*_ranges` array simply gets shorter
+between two consecutive historized `tag='config'` snapshots with **no
+keeper action in between**. That is the upgrade, not a lost setting and not
+a config that failed to save.
 
 **Verified against live rows** (2026-08-31, the three 0.27.0 devices in
 `devices`), after the firmware team flagged this shape as code-inspected
@@ -522,6 +631,7 @@ whether an apparent mismatch is just normal lag vs. a real bug:
 | Day Light/UVB/Basking schedule re-check | 15s |
 | Fan assist re-evaluation (§5a) | 30s |
 | Scheduled mist window re-evaluation (§4a) | 30s |
+| Mister spike expiry tick (`applyMisterState()`) | 250ms (was 1s before 0.31.0) |
 | Telemetry sample shipped | 60s |
 | Heartbeat (`devices` upsert, `profile_config` snapshot) | 5 min |
 
@@ -537,15 +647,74 @@ is on the same interval for the same reason: up to ~30s at either edge of a
 window, which for a 15-minute spike is a real fraction of its length. Don't
 flag it.
 
+### 10a. Every mister spike runs long, never short
+
+A spike ends on the **first tick after it expires**, so the tick interval
+is a uniform overshoot tail on every spike. It is quantisation, not drift:
+the error is bounded by one tick and does not accumulate across spikes. And
+it has a sign — **a spike is never delivered short**.
+
+Measured on a deployed relay-backend device at the old 1s tick:
+
+| Nominal | Delivered | Over |
+|---|---|---|
+| 5,000 ms (pulse) | 5,748 ms | +748 |
+| 5,000 ms (pulse) | 5,743 ms | +743 |
+| 15,000 ms (pulse) | 15,523 ms | +523 |
+| 60,000 ms (pulse) | 60,234 ms | +234 |
+| 120,000 ms (scheduled window) | 120,543 ms | +543 |
+
+Every one is inside a single tick interval. Two things these rows settle
+that were previously inference: the **scheduled** path works end to end on
+real hardware, and on the relay backend the outlet actuation itself is fast
+enough to disappear into the tick.
+
+Caveats before treating a tail as a budget:
+
+- **The 250ms tick's effect is unconfirmed.** 0.31.0 shipped after this
+  run. The tail *should* fall below 250ms; nobody has measured it.
+- **Kasa is unmeasured entirely.** Expect a variable WiFi round trip on top
+  of the tick there, so a Kasa device's tail is neither this table's shape
+  nor reliably bounded by the tick at all.
+
+So: allow at least one tick of overshoot on any spike-duration check, and
+treat a spike that ran **short** as the interesting signal — that direction
+is not something the tick can produce.
+
 ## 11. Anomaly conditions worth flagging
 
-**First, exclude test-driven rows.** The dashboard's "Test Automation" page
-runs a fake reading through the real decision logic and outlet control —
-any `logs` row with `message` starting `"test: "` reflects a simulated
-input, not the device's real sensor state, and will routinely fail every
-check below by design (see `docs/known-issues.md`'s climate-test section
-for exactly why). Filter these out before evaluating anything that
-follows.
+**First, exclude manual test rows.** Two different dashboard buttons drive
+the real decision logic and real outlets, and both log through the ordinary
+`tag='event'` path. Neither reflects an automation decision, and both will
+routinely fail every check below by design. Filter out any `logs` row whose
+message reason starts with either:
+
+| Prefix | Button | Notes |
+|---|---|---|
+| `test: ` | "Test Automation" (gauge-drag) | A simulated *sensor reading* run through the real logic — see `docs/known-issues.md`'s climate-test section for why its own `temp_c`/`hum` columns disagree with what drove it. |
+| `test pulse` | manual mister check (0.32.0+) | A human firing a spike by hand. `test pulse — manual mister check` opens it, `test pulse complete` closes it. |
+
+Note the two are **not one convention** — one has a colon and a following
+reason, the other doesn't — so match them as two literal prefixes, and treat
+the set as one that grows rather than a rule to infer. `isTestReason()` in
+`src/lib/logReasons.ts` is the shared implementation, deliberately in `lib/`
+rather than in the timeline component so an anomaly check can reach it.
+
+**Second, don't key anything on the rest of the message text.** This
+section's checks are all recomputations of state; that is deliberate, and
+it has now paid off twice. 0.32.0 rewrote the lighting outlets' reason from
+`scheduled day window`/`scheduled night window` to `inside its scheduled
+window`/`outside its scheduled window` — because each light runs its own
+independent windows and the old wording had only two words for the outcome,
+so a basking spot whose window opens at 09:00 correctly switched off at
+08:30 and logged `scheduled night window`, in the morning. The decision was
+never wrong; the sentence was, and it cost the firmware team real time
+chasing a phantom clock fault.
+
+Any rule that had keyed off those strings would have broken **silently** —
+the old text simply stops appearing. Treat every reason string in this
+document, the test prefixes above included, as a thing that describes the
+device to a human and may be rewritten in any release.
 
 Given the above, a genuine candidate for "device not doing what its own
 config says it should":
@@ -607,3 +776,47 @@ Always resolve the anomaly against the **historized** `profile_config`/
 `outlet_roles` in effect at that instant (per the webapp plan §3), not the
 device's current settings — a threshold change made today shouldn't be
 used to judge whether last week's behavior was correct.
+
+### 11a. Verifying a mister spike actually fired
+
+Every check above is a `telemetry.outlet_mask` comparison, and **none of
+them can see a mister spike**. Telemetry samples every 60s; spikes run
+5-300s, so most open and close entirely between two samples. A
+spike-verification rule built on `outlet_mask` would report "never fired"
+for spikes that fired perfectly.
+
+`logs` can see them. Every outlet transition writes a row with structured
+`outlet_index`/`outlet_state` columns and a `uptime_ms` stamp — **both
+edges of every spike are there**. So:
+
+- **Read `logs`, never `outlet_mask`, for anything spike-shaped.**
+- **Compute duration from `uptime_ms`, not `device_time`.** `uptime_ms` is
+  the device's own millisecond clock; `device_time` is second-resolution
+  and cannot resolve a 5s spike at all.
+- **Compare against §10a**, which says the delivered duration is the
+  nominal one plus up to one tick, always over. Short is the signal.
+
+Two things weaken a *negative* result specifically, and both mean absence
+of a row is much weaker evidence than presence of one:
+
+- These rows ship at **INFO**, so a device configured with a stricter
+  minimum severity never sends them.
+- CloudLog is a **best-effort queue** (`docs/cloudlog-dataflow.md`) — a
+  dropped row is an ordinary outcome, not a fault.
+
+So a rule of the form "these two edges exist and the gap between them is
+wrong" is sound; "no row, therefore the spike didn't fire" is not.
+
+The cause of a spike is in the reason text, subject to the whole of §11's
+second warning about depending on that text:
+
+| Text | Meaning |
+|---|---|
+| `scheduled mist window` | a configured spike (§4a) |
+| `scheduled mist window held off — enclosure too humid` | the `hum_trigger` ceiling suppressed it — correct behavior, per §4a |
+| `test pulse — manual mister check` | a human pressed a button — **not automation**, exclude per §11 |
+| `test pulse complete` | that pulse's closing edge |
+
+None of this is built. It is recorded because the earlier guidance said a
+spike-verification rule was not buildable at all, which was true of
+`outlet_mask` and wrong as a general claim.

@@ -142,7 +142,7 @@ test-driven outlet state with no way to distinguish it from a real one.
 ### What the webapp does about it
 
 - `DeviceTimeline.tsx`'s outlet-reason badge and the event log both check
-  for the `"test: "` prefix (`isTestReason()`) and render a distinct
+  the prefixes in `src/lib/logReasons.ts` (`isTestReason()`) and render a distinct
   neutral "TEST" tag instead of the normal color-coded reason, so a
   test-triggered transition is never mistaken for a real climate decision
   while debugging.
@@ -152,3 +152,28 @@ test-driven outlet state with no way to distinguish it from a real one.
   outlet state, and should treat `telemetry` samples in the ~60s window
   after one as suspect rather than trying to filter them precisely, since
   there's no marker on the telemetry row itself.
+
+### A second manual-test button, with a different prefix
+
+Firmware 0.32.0 added a **manual mister check** — a separate button that
+fires a mister spike by hand. It has the same character as `/climate-test`
+(a real outlet change that isn't an automation decision) but it does *not*
+follow the `"test: "` convention:
+
+```
+Mister [2] turned ON  — test pulse — manual mister check
+Mister [2] turned OFF — test pulse complete
+```
+
+No colon, and `"test pulse"` is the whole reason rather than a prefix on
+one. A `startsWith("test:")` check misses both rows entirely, which is
+exactly what `isTestReason()` did until the 0.30.0-0.32.0 handoff; it now
+matches both prefixes explicitly, and `test/logReasons.test.ts` pins both. Treat "reasons that mark a manual action"
+as a **list that grows**, not a single naming rule — and see
+`docs/automation-rules.md` §11 on why none of these strings should be
+depended on more than this.
+
+Unlike the `/climate-test` case, these rows' `temp_c`/`hum` columns are not
+misleading — nothing fake was fed to the controller, a human just asked for
+a spike. The reason to filter them is that they aren't automation, not that
+their sensor columns lie.

@@ -1,16 +1,23 @@
-import type { LightWindow, MisterWindow, ProfileConfig } from '@/lib/types';
+import type { LightWindow, MisterDurationWindow, MisterWindow, ProfileConfig } from '@/lib/types';
 
-// Firmware 0.26.0 gave each light up to three independent daily windows
+// Firmware 0.26.0 gave each light several independent daily windows
 // (docs/automation-rules.md §6). The old scalar pairs still ship, but they
 // carry only `*_ranges[0]` — so anything that reads day_light_on/uvb_on/
 // basking_on directly silently loses every window after the first, and
 // computes "should be off" straight through them. This module is the only
 // place that should touch those fields; everything else calls lightWindows().
+//
+// How MANY windows is per-array and has already changed once (0.32.0 moved
+// day light 3->2, UVB 3->1, mister 3->5; see §6). Nothing here is allowed to
+// care: unused windows have always been omitted, so an array's length was
+// never its cap, and callers OR across whatever arrives. Don't reintroduce a
+// literal 3 anywhere downstream of this module.
 
 // The three scheduled lights, and deliberately nothing else. `mister_ranges`
-// (docs/automation-rules.md §4a) is the same window shape but is NOT a
-// LightRole: fan assist folds over exactly these three (§5a), and mister
-// windows carry an always-false `fan` key that must not join that fold.
+// (docs/automation-rules.md §4a) is NOT a LightRole: fan assist folds over
+// exactly these three (§5a), and a mister window must never join that fold
+// — on 0.28.0 it carries an always-false `fan` key, and 0.29.0 dropped the
+// key outright. Nor is it the same shape any more (§4a's duration fork).
 // Read those through misterWindows() below instead.
 export type LightRole = 'day_light' | 'uvb' | 'basking';
 
@@ -85,8 +92,9 @@ export function lightWindows(profileConfig: ProfileConfig | null, role: LightRol
  * Windows are unnormalized, exactly like the lighting ones — unsorted,
  * possibly overlapping, possibly wrapping past midnight.
  *
- * The returned windows deliberately have no `fan` field even though one is
- * on the wire: see MisterWindow in src/lib/types.ts.
+ * The returned windows are a UNION of two shapes and are deliberately not
+ * normalized to one: run each through isMisterDurationWindow() before
+ * reading its span. See MisterWindow in src/lib/types.ts.
  */
 export function misterWindows(profileConfig: ProfileConfig | null): MisterWindow[] | null {
   if (!profileConfig) return null;
@@ -94,4 +102,35 @@ export function misterWindows(profileConfig: ProfileConfig | null): MisterWindow
   // Key presence, not devices.fw_version — same reasoning as lightWindows().
   const ranges = profileConfig.mister_ranges;
   return Array.isArray(ranges) ? ranges : [];
+}
+
+/**
+ * Which of the two `mister_ranges` shapes a window is (§4a).
+ *
+ * `duration_s` present means 0.29.0+'s start-plus-duration form; otherwise
+ * it's a 0.28.0 `on`/`off` pair. That is the fork the firmware handoff
+ * specifies, and it is deliberately key presence rather than a
+ * `fw_version` comparison: BOTH shapes are live and neither ages out.
+ * Historized tag='config' rows keep whatever shape they were written
+ * under, so a device that has been through the 0.28.0 → 0.29.0 upgrade has
+ * a permanent stripe of old-shape rows in its own history — version-gating
+ * a historical check against its current version reads the wrong branch for
+ * that stripe, exactly as in lightWindows().
+ *
+ * Spans differ by more than arithmetic. A 0.28.0 window is two
+ * minute-resolution clock times, evaluated with §6's `in_window`. A 0.29.0
+ * window is a start time plus a duration in SECONDS (5-300, always a
+ * multiple of 5), so `open` is
+ * `((now_local_seconds - to_seconds(on)) mod 86400) < duration_s` — which
+ * needs a SECONDS-resolution local clock. Rounding it to the minute
+ * resolution the rest of automation-rules.md uses computes a 5s spike as
+ * either never on or a full minute on.
+ *
+ * Neither span is computed here: that needs the device's resolved local
+ * time, the same thing blocking §6-8 (see src/lib/automation.ts). This
+ * function exists so that when it lands, the fork is already made in one
+ * place, and so the UI can render each shape as what it actually is.
+ */
+export function isMisterDurationWindow(window: MisterWindow): window is MisterDurationWindow {
+  return 'duration_s' in window;
 }

@@ -45,21 +45,50 @@ export type LightWindow = {
 };
 
 // One scheduled mist window from `mister_ranges` (firmware 0.28.0+,
-// docs/automation-rules.md §4a). Same wire shape and same in_window rule as
-// LightWindow — firmware reuses the lighting windows' writer — driving a
-// fixed-time-of-day spike of the Mister outlet on top of the humidistat.
+// docs/automation-rules.md §4a): a fixed-time-of-day spike of the Mister
+// outlet on top of the reactive humidistat.
 //
-// The `fan` key IS present on the wire here and is deliberately absent from
-// this type: it is always false (the device never offers that checkbox for
-// the mister, and venting mid-spike would fight the thing the window exists
-// to do), so it must never reach fan assist, which folds over the three
-// lighting arrays only (§5a). Leaving the field out means `r.fan` doesn't
-// compile against a mister window rather than silently contributing a term
-// that is only false for as long as firmware keeps writing it that way.
-export type MisterWindow = {
+// TWO wire shapes, and this is permanent rather than transitional — see
+// §4a. Discriminate on key presence (`'duration_s' in w`), never on
+// `fw_version`; src/lib/schedule.ts's isMisterDurationWindow() is the one
+// place that decides.
+//
+// 0.28.0 reused the lighting windows' writer verbatim, which was the wrong
+// shape for a mister: a pair of minute-resolution clock times cannot
+// express anything shorter than 60 seconds of water, far more than a
+// humidity spike wants. 0.29.0 — published the very next day — replaced it
+// with a start plus an explicit duration.
+export type MisterSpanWindow = {
   on: string;
+  // 0.28.0 ONLY. That release lived one day, and its windows ship unused by
+  // default, so the population emitting this is small — but historized
+  // tag='config' rows keep whatever shape they were written under, so it
+  // never ages out of the history.
   off: string;
 };
+
+export type MisterDurationWindow = {
+  on: string;
+  // 0.29.0+. SECONDS — always a multiple of 5, between 5 and 300. Reading
+  // it as minutes turns a 15-second spike into a 15-minute one.
+  //
+  // Because the shortest legal value is 5s and the resolution is 1s, a
+  // duration window's span can only be evaluated against a
+  // SECONDS-resolution local clock. Every other rule in automation-rules.md
+  // compares at minute resolution; do that here and a 5s spike computes as
+  // either never on or a full minute on.
+  duration_s: number;
+};
+
+// The `fan` key is deliberately unrepresentable on either shape. On 0.28.0
+// windows it IS on the wire and always false (the device never offers that
+// checkbox for the mister, and venting mid-spike would fight the thing the
+// window exists to do); 0.29.0 dropped it from the array entirely. Either
+// way it must never reach fan assist, which folds over the three lighting
+// arrays only (§5a) — leaving the field out means `w.fan` fails to compile
+// rather than silently contributing a term that is only false for as long
+// as firmware keeps writing it that way.
+export type MisterWindow = MisterSpanWindow | MisterDurationWindow;
 
 // Firmware 0.5.0 switched the wire format from Fahrenheit to Celsius
 // (temp_low_f/temp_high_f -> temp_low_c/temp_high_c — see
@@ -71,8 +100,10 @@ export type MisterWindow = {
 // tempRangeC(), never these fields directly.
 //
 // Firmware 0.26.0 did the same thing to the lighting schedule: each light
-// went from one on/off pair to up to three independent windows, and a sixth
-// role (Basking Spot) joined. The scalar pairs still ship, but they now
+// went from one on/off pair to several independent windows, and a sixth
+// role (Basking Spot) joined. (How many per light is not uniform and moves
+// between releases — see src/lib/schedule.ts; nothing should encode a
+// count.) The scalar pairs still ship, but they now
 // carry *only the first window* — reading them alone silently loses every
 // later window, so read via src/lib/schedule.ts's lightWindows(), never
 // these fields directly. Both the arrays and basking_on/basking_off are
