@@ -18,7 +18,7 @@ import { deriveHealthEvents, findTelemetryGaps, mergeTimelineEntries, type Timel
 import { msSinceDeviceBoot, OUTLET_MISMATCH_DEBOUNCE_SAMPLES, STALE_AFTER_MS } from '@/lib/queries';
 import type { Device, LogLevel, LogRow, LogTag, ProfileConfig, OutletAlertRow } from '@/lib/types';
 import { celsiusDeltaToFahrenheit, celsiusToFahrenheit, tempRangeC } from '@/lib/units';
-import { isMisterDurationWindow, lightWindows, misterWindows, type LightRole } from '@/lib/schedule';
+import { fanWindows, isMisterDurationWindow, lightWindows, misterWindows, type LightRole } from '@/lib/schedule';
 import { isTestReason, reasonOnly } from '@/lib/logReasons';
 import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
 import { GAUGE_COLORS } from '@/lib/gaugeColors';
@@ -330,6 +330,18 @@ function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null
   // not the spike the upgraded device now runs.
   const mistWindows = misterWindows(profileConfig) ?? [];
 
+  // Scheduled fan windows (firmware 0.33.0+, docs/automation-rules.md §5b)
+  // sit here for the same reason: a fixed time of day that runs the Fan
+  // regardless of temperature or humidity, so showing them beside the
+  // ceilings would misread them as part of the vent's thresholds.
+  //
+  // These are NOT the `fan` assist flag on the lighting windows above (§5a).
+  // That one is a property of a light's window; this is the fan's own
+  // schedule, and they're separate terms of the same decision — which is why
+  // this row is labelled as a schedule rather than folded into the light
+  // rows as an annotation.
+  const scheduledFanWindows = fanWindows(profileConfig) ?? [];
+
   return (
     <details className="group rounded-xl bg-device-surface">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 text-device-text">
@@ -375,6 +387,21 @@ function ProfileSummary({ profileConfig }: { profileConfig: ProfileConfig | null
                 {mistWindows.map((range, index) => (
                   <p key={index} className="text-[0.85em] text-device-text">
                     {isMisterDurationWindow(range) ? `${range.on} for ${range.duration_s}s` : `${range.on} – ${range.off}`}
+                  </p>
+                ))}
+              </div>
+            )}
+            {/* Same "only when non-empty" call as the mister above, and it
+                binds harder here: `fan_ranges` ships as an empty array on
+                every 0.33.0 device until its keeper fills in the new Fan
+                Schedule card, so a "Not scheduled" row would be stating a
+                keeper's choice for essentially the whole fleet. */}
+            {scheduledFanWindows.length > 0 && (
+              <div>
+                <p className="text-[0.75em] text-device-text-tertiary">Fan (scheduled)</p>
+                {scheduledFanWindows.map((range, index) => (
+                  <p key={index} className="text-[0.85em] text-device-text">
+                    {range.on} – {range.off}
                   </p>
                 ))}
               </div>

@@ -16,11 +16,11 @@
 // confident-looking false anomalies.
 //
 // That same missing clock is why two of the rules below are incomplete:
-// fan assist (§5a) adds a third term to the Fan as of firmware 0.27.0, and
-// scheduled mist windows (§4a) add a second term to the Mister as of
-// 0.28.0 — both driven by clock windows. Both are long since released; the
-// fleet is on 0.30.0-0.32.0. So `decision.fan` and `decision.mist` are each
-// the climate half alone. See their comments.
+// the Fan has gained two clock-driven terms — fan assist (§5a) in 0.27.0
+// and a fan schedule (§5b) in 0.33.0 — and the Mister one, scheduled mist
+// windows (§4a) in 0.28.0. All are long since released; the fleet is on
+// 0.30.0-0.33.0. So `decision.fan` and `decision.mist` are each the climate
+// half alone. See their comments.
 //
 // The mister's clock requirement is strictly harder than the lights': a
 // 0.29.0+ spike is a start plus a duration in seconds, as short as 5, so
@@ -82,20 +82,35 @@ export type ClimateDecision = {
   // dead band while the real device keeps it shut.
   mist: boolean;
   // The CLIMATE half of the Fan rule only — `temp_trigger OR hum_trigger`.
-  // Firmware 0.27.0 added a third term, fan assist (automation-rules.md
-  // §5a): a lighting window with `fan` ticked runs the Fan for its
-  // duration, and basking windows are ticked by default. Computing it needs
-  // the device's local time, the same thing blocking §6-8 below, so this
-  // field is a LOWER BOUND on the fan's real state.
+  // The real fan is a four-term OR, and the other two terms are both clock
+  // windows this module cannot yet evaluate (automation-rules.md §5):
   //
-  // It's still exact wherever no window in the snapshot has `fan` ticked —
-  // fan_assist is false at every instant then — and needs no clock to
-  // check. That covers the whole pre-multi-window fleet, since no *_ranges
-  // at all means no ticked window, plus every snapshot written by firmware
-  // 0.26.0, which ships the arrays with no `fan` key on any window. That, not a version comparison, is the gate
-  // for the §11 fan anomaly check; against a snapshot that does have a
-  // ticked window, this field will report a stuck relay on an ordinary,
-  // correctly-behaving device.
+  //   - fan assist (§5a, firmware 0.27.0) — a lighting window with `fan`
+  //     ticked runs the Fan for that window's duration, and basking windows
+  //     are ticked by default.
+  //   - a scheduled fan window (§5b, firmware 0.33.0) — a window in
+  //     `fan_ranges`, airflow on a clock rather than on a bulb or a ceiling.
+  //
+  // Computing either needs the device's local time, the same thing blocking
+  // §6-8 below, so this field is a LOWER BOUND on the fan's real state.
+  // Both missing terms are purely additive and nothing suppresses either,
+  // so the bound only ever errs one way: the real fan may be on when this
+  // says off, never the reverse.
+  //
+  // The §11 fan anomaly check gates on the SNAPSHOT, not on a version, and
+  // it now has to clear both terms — this field is exact only where the
+  // snapshot has no `fan`-ticked lighting window AND no `fan_ranges`
+  // window, because that is when both missing terms are false at every
+  // instant. Neither half needs a clock to determine: read the lighting
+  // windows through lightWindows() and the fan schedule through
+  // fanWindows() (src/lib/schedule.ts), and skip the check where either is
+  // non-empty rather than reporting a mismatch you know to be spurious.
+  //
+  // In practice the two halves of that gate have opposite reach. The
+  // fan-assist half excludes most of the current fleet, since basking
+  // windows ship ticked; the `fan_ranges` half excludes almost none, since
+  // 0.33.0 ships the array empty until a keeper fills it. Checking only the
+  // half that usually bites is how the §5b term gets forgotten.
   //
   // It stays named `fan` because climate_vectors.json's own vectors use that
   // key and test/automation.test.ts deep-equals the whole decision against

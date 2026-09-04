@@ -90,6 +90,29 @@ export type MisterDurationWindow = {
 // as firmware keeps writing it that way.
 export type MisterWindow = MisterSpanWindow | MisterDurationWindow;
 
+// One scheduled fan window from `fan_ranges` (firmware 0.33.0+,
+// docs/automation-rules.md §5b): a fixed time-of-day window that runs the
+// Fan outlet on airflow grounds alone — a morning air change, a purge
+// through the hottest hours, a stretch of venting after lights-out — rather
+// than because a ceiling was reached or a bulb is lit.
+//
+// The same `{on, off}` minute-resolution pair a lighting window uses,
+// midnight wrap included, evaluated with §6's in_window. Unlike
+// `mister_ranges` there is only one shape and no duration fork: a fan
+// window is always long enough to express in clock times, which is also why
+// it is the one schedule term that shows up reliably in `outlet_mask`.
+//
+// The `fan` key is deliberately unrepresentable here, as on MisterWindow
+// but for a sharper reason: the fan cannot assist itself, so firmware never
+// writes the key on these entries at all. They are §5b's own term in the
+// fan formula and must never join §5a's `fan_assist` fold over the three
+// lighting arrays — leaving the field out means `w.fan` fails to compile
+// rather than silently contributing a term that is only ever false.
+export type FanWindow = {
+  on: string;
+  off: string;
+};
+
 // Firmware 0.5.0 switched the wire format from Fahrenheit to Celsius
 // (temp_low_f/temp_high_f -> temp_low_c/temp_high_c — see
 // docs/known-issues.md). profile_config is a JSONB blob that only gets
@@ -135,6 +158,15 @@ export type ProfileConfig = {
   // `[]` in the formula: humidistat only. Read via
   // src/lib/schedule.ts's misterWindows().
   mister_ranges?: MisterWindow[];
+  // Firmware 0.33.0+ (§5b). No scalar first-window companion either, for
+  // the same reason as the mister's: nothing ever read a fan schedule, so
+  // there is no pre-multi-window validator to keep working. Absent (every
+  // pre-0.33.0 device, and every historized tag='config' row written before
+  // its upgrade) means the same thing as `[]` in the formula — the fan runs
+  // on the two ceilings and fan assist alone. Ships `[]` on any device whose
+  // keeper hasn't scheduled one, which is every device until they do. Read
+  // via src/lib/schedule.ts's fanWindows().
+  fan_ranges?: FanWindow[];
   timezone: string;
   ota_url: string;
   kasa_ip?: string;

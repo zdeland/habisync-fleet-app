@@ -21,6 +21,32 @@ detection to version comparisons regardless: a historized `tag='config'`
 row keeps the shape it was written under, so a device's *current* version
 misjudges its own past rows (§6, §11).
 
+## 0. Which firmware handoffs this document has absorbed
+
+The firmware team sends a per-release handoff describing what the webapp
+must change. This repo folds each one into the sections below rather than
+archiving it, which is fine for the rules but leaves no record of what was
+received — and that gap has already cost real drift: the `0.29.0` handoff
+never reached the repo at all, and nothing noticed for four releases,
+because the `0.30.0-0.32.0` handoff cited it as "still correct" and the
+citation looked like evidence. It isn't. **When a handoff says it supersedes
+nothing, check this list and then check the section it names.**
+
+| Handoff | Landed | What it added |
+|---|---|---|
+| 0.5.0 | yes | Celsius wire format (§2) |
+| 0.26.0 | yes | Multi-window lighting, Basking Spot (§6-8) |
+| 0.27.0 | yes | Fan assist (§5a) |
+| 0.28.0 | yes | Scheduled mist windows (§4a) |
+| 0.29.0 | yes — late, four releases after the fact | `mister_ranges` duration shape (§4a-i) |
+| 0.30.0-0.32.0 | yes | Per-array window caps (§6a), reason-string rewrites, `test pulse` (§11) |
+| 0.33.0 | yes | Scheduled fan windows (§5b) |
+
+Rows before 0.29.0 are reconstructed from what is demonstrably in this
+document, not from a received-and-filed copy — the ledger starts here, so
+treat their "yes" as "the content is present" rather than as a delivery
+record.
+
 Implemented in this repo as `src/lib/automation.ts` (Heater/Mister/Fan
 only so far — see that file for why the lighting rules aren't implemented
 yet), tested against `test/fixtures/climate_vectors.json` in
@@ -43,6 +69,7 @@ Per device, per instant:
   `uvb_ranges`, `basking_ranges` (each window carrying `on`, `off` and the
   `fan` assist flag of §5a), `mister_ranges` (**not** the same window shape
   since 0.29.0 — `on` plus `duration_s` in seconds, and no `fan`; §4a-i),
+  `fan_ranges` (an `on`/`off` pair like the lights, and no `fan`; §5b),
   `timezone`. Same firmware-version caveat
   in both directions — older snapshots carry `temp_low_f`/`temp_high_f`
   instead of the Celsius pair, and carry the single-window scalars
@@ -304,10 +331,10 @@ the wire format against a real snapshot before building the §11 mister
 anomaly rules on it.** Not confirmed either: the 0.28.0 → 0.29.0 NVS
 migration described above, and the Kasa backend's spike timing (§10a).
 
-## 5. Fan (safety-ceiling vent, plus fan assist)
+## 5. Fan (safety-ceiling vent, plus fan assist and a fan schedule)
 
-Outlet role: `"Fan"`. Independent of Heater/Mister — reacts only to the
-*high* ceilings, never the low thresholds:
+Outlet role: `"Fan"`. Independent of Heater/Mister — the two reactive terms
+below read only the *high* ceilings, never the low thresholds:
 
 ```
 temp_trigger:
@@ -318,14 +345,20 @@ hum_trigger:
   if hum >= hum_high:                                hum_trigger = ON
   elif hum_trigger == ON and hum < hum_high - 3.0:    hum_trigger = OFF
 
-fan = temp_trigger OR hum_trigger OR fan_assist
+fan = temp_trigger OR hum_trigger OR fan_assist OR fan_window
 ```
+
+**Four terms as of firmware 0.33.0**, and the last two are clock windows
+rather than sensor readings: `fan_assist` (§5a, 0.27.0+) and `fan_window`
+(§5b, 0.33.0+). Every one of them is purely additive and none of them is
+suppressed by anything, so this really is a plain OR with no interaction to
+model — which is what makes dropping one so easy and so quiet.
 
 Note the hysteresis band here sits **below the ceiling**
 (`temp_high_c - 1.0`), a different location than the Heater's own band
 (`temp_low_c + 1.0`) — don't reuse one dead-band calculation for both.
 
-`fan` collapses two independent booleans via OR — this is *exactly* the
+`fan` collapses independent booleans via OR — this is *exactly* the
 seam that caused the stale-reason bug fixed in firmware `0.5.0`. The
 on-device `logs.message` text for a fan event ("temperature at safety
 ceiling" / "humidity at safety ceiling" / "both" / "back to normal") is a
@@ -438,9 +471,106 @@ the fan ON with both triggers OFF and flags a stuck relay — the exact
 anomaly in §11. Because basking windows are ticked by default, that fires
 on ordinary, correctly-behaving devices rather than as a rare edge case.
 This repo's `src/lib/automation.ts` computes only the two climate terms
-today (the third needs the same local clock that blocks §6-8), so its
+today (the other two need the same local clock that blocks §6-8), so its
 `decision.fan` is a **lower bound** — see the comment on `ClimateDecision`
 before building any fan check on it.
+
+### 5b. Scheduled fan windows (firmware 0.33.0+)
+
+`profile_config` gains a fifth ranges array, and the Fan gains a **fourth**
+term:
+
+```
+fan_window = ANY(in_window(now_local, r.on, r.off) for r in fan_ranges)
+```
+
+```json
+"fan_ranges": [{"on": "06:00", "off": "07:00"}, {"on": "22:00", "off": "23:30"}]
+```
+
+Airflow that isn't tied to a bulb being lit or a ceiling being reached — a
+morning air change, a purge through the hottest hours, a stretch of venting
+after lights-out. Up to three windows; unused ones are omitted, so don't
+encode that number (§6a).
+
+**Not a new role.** `outlet_roles` is unchanged and `outlet_mask` doesn't
+change structurally — this is the existing `"Fan"` outlet gaining a fourth
+input, exactly as §4a gave the Mister a second.
+
+**This is not fan assist, and must not be folded into it.** The entries
+carry **no `fan` key**, deliberately and permanently: "run the fan during
+this window" is not a question a fan window can ask, because the fan cannot
+assist itself, and a permanently-`false` key would be an invitation to
+merge the two. §5a's fold is still over the three *lighting* arrays and
+only those. A generic reducer that folds `r.fan AND in_window(r)` over every
+`*_ranges` array reads `undefined` here and drops this term entirely — the
+third time that shortcut has been quietly wrong (§5a lists the first two),
+and the first time it costs an answer rather than merely getting lucky.
+`src/lib/types.ts` leaves `fan` off `FanWindow` so `w.fan` fails to compile.
+
+Two properties, and both make this term *simpler* than the schedules
+around it:
+
+- **Purely additive.** A window can only turn the fan *on*. It never cuts
+  short a vent that `temp_trigger`/`hum_trigger` already wants, so there is
+  no interaction to model — plain `OR`, as in §5.
+- **Nothing suppresses it.** Unlike a basking window (forced off by the
+  too-hot cutout, §8) or a scheduled mist spike (held off at the humidity
+  ceiling, §4a), a fan window has no override working against it. More
+  airflow is never the unsafe direction. A suppression clause copied here
+  from either of those rules is not merely redundant, it manufactures false
+  positives.
+
+It does still need a synced clock, like every schedule term (§9) — without
+one the term is false and the fan runs reactively, so a just-booted device
+is *less* on than a naive recompute expects, never more.
+
+Reading the array:
+
+- **An absent key means `[]`.** Pre-0.33.0 devices emit no `fan_ranges` at
+  all, and the three-term formula stays exactly right for them. Key
+  presence, no version gate — the same detection as §4a and §6.
+- **`[]` is the normal case, not an edge case.** The array ships empty on
+  every device until a keeper opens the new *Fan Schedule* card and fills
+  it in, so absent and empty are indistinguishable in effect here as they
+  are for the mister, and both will be overwhelmingly common for a while.
+- **There is no scalar companion** — no `fan_on`/`fan_off`. Nothing ever
+  read a fan schedule, so there is no pre-multi-window validator to keep
+  working and §6's first-window trap has no analogue. Read `fan_ranges` or
+  nothing.
+- Windows are unsorted, may overlap, and may wrap past midnight (an `off`
+  earlier than its `on`), same as §6. One shape only: unlike `mister_ranges`
+  there is no `duration_s` fork, so `in_window` at minute resolution is
+  correct for every one of them.
+
+`src/lib/schedule.ts`'s `fanWindows()` is this repo's reader.
+
+**Verified against telemetry, unlike a mist spike.** Windows are
+minute-resolution, so they are always long enough to appear in
+`telemetry.outlet_mask` — §11a's "read `logs`, never `outlet_mask`" applies
+to spike-shaped things and does *not* apply here. A fan window is an
+ordinary §11 `outlet_mask` comparison.
+
+#### 5b-i. What is actually confirmed
+
+Weaker than most of what surrounds it, and the firmware team says so.
+
+- **Confirmed:** 0.33.0 builds with the term wired in, and the decision is
+  a plain OR of four booleans by inspection.
+- **Not confirmed on hardware.** No fan window has run on a deployed
+  device. The main reason for confidence is that the window arithmetic is
+  the same `in_window` helper the lights have used since 0.27.0, unchanged
+  by this release — but the wiring of the new term into `applyFanState()`,
+  the settings card round-trip, and the NVS keys are all code-inspected
+  only.
+- **The wire format is unobserved**, like `mister_ranges` before it (§4a-ii)
+  — no `profile_config` row carrying a populated `fan_ranges` has been
+  captured. That is now two arrays outstanding in the same column.
+
+Treat the shape above as the spec, and confirm it against a real snapshot
+before building anything that depends on a *populated* array. Note the gate
+in §11 does not: it depends only on the array being absent or empty, which
+is the case the fleet is actually in.
 
 ## 6. Day Light
 
@@ -472,7 +602,8 @@ entirely on a 0.26.0 snapshot (§5a's table).
 ### 6a. How many windows — per array, and not stable
 
 Through 0.31.0 every one of these arrays allowed three. As of **0.32.0**
-the caps are per-array and differ:
+the caps are per-array and differ, and 0.33.0 added a fifth array with a
+cap of its own:
 
 | Array | Max windows | Was |
 |---|---|---|
@@ -480,6 +611,7 @@ the caps are per-array and differ:
 | `uvb_ranges` | 1 | 3 |
 | `basking_ranges` | 3 | 3 |
 | `mister_ranges` (§4a) | 5 | 3 |
+| `fan_ranges` (§5b) | 3 | n/a — new in 0.33.0 |
 
 **Nothing should read these numbers.** They are here to explain what you
 will see in the data, not to be encoded anywhere. Iterating the array and
@@ -630,6 +762,7 @@ whether an apparent mismatch is just normal lag vs. a real bug:
 | Heater/Mister/Fan re-evaluation | 30s |
 | Day Light/UVB/Basking schedule re-check | 15s |
 | Fan assist re-evaluation (§5a) | 30s |
+| Scheduled fan window re-evaluation (§5b) | 30s |
 | Scheduled mist window re-evaluation (§4a) | 30s |
 | Mister spike expiry tick (`applyMisterState()`) | 250ms (was 1s before 0.31.0) |
 | Telemetry sample shipped | 60s |
@@ -646,6 +779,13 @@ than the lights' own 15s, on the same edge. A scheduled mist window (§4a)
 is on the same interval for the same reason: up to ~30s at either edge of a
 window, which for a 15-minute spike is a real fraction of its length. Don't
 flag it.
+
+A scheduled fan window (§5b) inherits the same 30s, since the Fan has a
+single writer on the climate interval — so a fan window can lag its own
+boundary by up to 30s in either direction. Combined with 60s telemetry, a
+one-sample disagreement at a window edge is expected noise, and the
+multiple-consecutive-samples rule above already covers it. It needs no
+special case of its own.
 
 ### 10a. Every mister spike runs long, never short
 
@@ -726,20 +866,37 @@ config says it should":
 - Fan `outlet_mask` bit is ON while the recomputed `fan` is OFF (or vice
   versa) for a sustained stretch — flags either a stuck relay/Kasa outlet,
   or the device running firmware whose fan logic has diverged from this
-  spec. **Only valid against all three terms** (§5a): `temp_trigger OR
+  spec. **Only valid against all four terms** (§5): `temp_trigger OR
   hum_trigger` alone reports a stuck relay for the whole duration of any
-  ticked window, and basking windows are ticked by default, so the
-  two-term version fires on healthy devices.
+  ticked lighting window *or* any scheduled fan window, and basking windows
+  are ticked by default, so the two-term version fires on healthy devices.
 
-  Gate it on the snapshot, not on a version — the two-term formula is
-  exactly right whenever **no window in that snapshot has `fan` ticked**,
-  because `fan_assist` is then false at every instant. That covers the
-  entire pre-multi-window fleet outright (no `*_ranges` at all means no
-  ticked window) and every `0.26.0`-shaped snapshot (arrays present, the
-  key absent on all of them), plus any 0.27.0 device with the boxes
-  unticked — and needs no clock to determine. Where a ticked window does exist, skip the check
-  until fan assist is actually computed rather than reporting a mismatch
-  you know to be spurious.
+  Gate it on the snapshot, not on a version. The two-term formula is exact
+  only where **both** clock terms are false at every instant, which needs
+  two independent conditions on that snapshot:
+
+  1. **No window has `fan` ticked** (§5a), so `fan_assist` never fires.
+     That covers the entire pre-multi-window fleet outright (no `*_ranges`
+     at all means no ticked window) and every `0.26.0`-shaped snapshot
+     (arrays present, the key absent on all of them), plus any 0.27.0+
+     device with the boxes unticked.
+  2. **`fan_ranges` is absent or empty** (§5b), so `fan_window` never
+     fires. That covers every pre-0.33.0 snapshot and — for now — very
+     nearly every 0.33.0 one, since the array ships empty until a keeper
+     fills it.
+
+  Neither condition needs a clock. Where either fails, skip the check until
+  the corresponding term is actually computed rather than reporting a
+  mismatch you know to be spurious.
+
+  **Check both.** Their reach is lopsided in opposite directions —
+  condition 1 excludes most of today's fleet, condition 2 excludes almost
+  none — and a gate that tests only the half that usually bites looks
+  correct against every device except the handful whose keepers used the
+  new *Fan Schedule* card. That is the same failure shape as recomputing
+  the mister without `mister_ranges` or a light from the scalars alone:
+  right about the fleet, wrong about exactly the devices someone
+  configured on purpose.
 - Mister `outlet_mask` bit is ON while the recomputed `humidistat` is OFF
   for a sustained stretch — the humidity-side sibling of the Fan bullet
   above, and **only valid against both terms** (§4a): the humidistat alone

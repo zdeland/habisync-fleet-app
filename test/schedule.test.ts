@@ -1,17 +1,19 @@
-// Pins src/lib/schedule.ts's two feature-detection forks — the ones the
-// firmware handoffs keep insisting must never become version comparisons:
+// Pins src/lib/schedule.ts's feature-detection forks — the ones the firmware
+// handoffs keep insisting must never become version comparisons:
 //
-//   - whether a snapshot has `*_ranges` arrays at all (0.26.0+) vs. the
-//     pre-multi-window scalar pairs, and
+//   - whether a snapshot has the lighting `*_ranges` arrays at all (0.26.0+)
+//     vs. the pre-multi-window scalar pairs,
 //   - per mister window, whether it is 0.29.0+'s start-plus-duration or a
-//     0.28.0 on/off pair (docs/automation-rules.md §4a-i).
+//     0.28.0 on/off pair (docs/automation-rules.md §4a-i), and
+//   - whether a snapshot carries `mister_ranges` (0.28.0+) or `fan_ranges`
+//     (0.33.0+) at all, each of which reads as [] when absent.
 //
-// Both shapes of both forks are permanently live, because historized
-// tag='config' rows keep whatever shape they were written under — so these
-// are not transitional cases that eventually get deleted.
+// Every shape here is permanently live, because historized tag='config' rows
+// keep whatever shape they were written under — so these are not
+// transitional cases that eventually get deleted.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isMisterDurationWindow, lightWindows, misterWindows } from '../src/lib/schedule';
+import { fanWindows, isMisterDurationWindow, lightWindows, misterWindows } from '../src/lib/schedule';
 import type { MisterWindow, ProfileConfig } from '../src/lib/types';
 
 // Only the fields these functions read; the rest of ProfileConfig is
@@ -97,4 +99,46 @@ test('isMisterDurationWindow forks on duration_s, not on the release', () => {
   // falsy-ish absent key.
   assert.equal(isMisterDurationWindow({ on: '00:00', duration_s: 5 }), true);
   assert.equal(isMisterDurationWindow({ on: '00:00', duration_s: 300 }), true);
+});
+
+test('fanWindows reads an absent key as [], not as unknown', () => {
+  // §5b, and the same call as the mister's: a pre-0.33.0 device has no key,
+  // and the three-term fan formula is exactly right there. [] rather than
+  // null, which stays reserved for "no config at all".
+  //
+  // This is the ordinary case rather than a legacy one — 0.33.0 ships the
+  // array empty until a keeper fills in the Fan Schedule card — and it is
+  // also the case §11's anomaly gate turns on, so it is worth pinning
+  // separately from the populated shape below.
+  assert.equal(fanWindows(null), null);
+  assert.deepEqual(fanWindows(config({})), []);
+  assert.deepEqual(fanWindows(config({ fan_ranges: [] })), []);
+});
+
+test('fanWindows returns every window, whatever the array length', () => {
+  // Cap is three today (§6a) and nothing may encode that, exactly as with
+  // the lights. Midnight wrap is expressed the same way too — an `off`
+  // earlier than its `on` — and passes through untouched rather than being
+  // split or reordered.
+  const wrapping = [
+    { on: '06:00', off: '07:00' },
+    { on: '22:00', off: '23:30' },
+    { on: '23:45', off: '00:15' },
+  ];
+  assert.deepEqual(fanWindows(config({ fan_ranges: wrapping })), wrapping);
+  assert.deepEqual(fanWindows(config({ fan_ranges: [{ on: '06:00', off: '07:00' }] })), [
+    { on: '06:00', off: '07:00' },
+  ]);
+});
+
+test('a fan window carries no fan assist flag', () => {
+  // §5b: the fan cannot assist itself, so firmware never writes the key
+  // here. `w.fan` is a compile error on FanWindow — the whole point, since a
+  // generic fold of `r.fan AND in_window(r)` over every *_ranges array would
+  // otherwise read undefined and silently drop the §5b term.
+  //
+  // The type is the real guard; this asserts the runtime half, that nothing
+  // in the reader invents the key on the way through.
+  const [window] = fanWindows(config({ fan_ranges: [{ on: '06:00', off: '07:00' }] })) ?? [];
+  assert.equal('fan' in window, false);
 });

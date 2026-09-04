@@ -1,4 +1,4 @@
-import type { LightWindow, MisterDurationWindow, MisterWindow, ProfileConfig } from '@/lib/types';
+import type { FanWindow, LightWindow, MisterDurationWindow, MisterWindow, ProfileConfig } from '@/lib/types';
 
 // Firmware 0.26.0 gave each light several independent daily windows
 // (docs/automation-rules.md §6). The old scalar pairs still ship, but they
@@ -13,12 +13,24 @@ import type { LightWindow, MisterDurationWindow, MisterWindow, ProfileConfig } f
 // never its cap, and callers OR across whatever arrives. Don't reintroduce a
 // literal 3 anywhere downstream of this module.
 
-// The three scheduled lights, and deliberately nothing else. `mister_ranges`
-// (docs/automation-rules.md §4a) is NOT a LightRole: fan assist folds over
-// exactly these three (§5a), and a mister window must never join that fold
-// — on 0.28.0 it carries an always-false `fan` key, and 0.29.0 dropped the
-// key outright. Nor is it the same shape any more (§4a's duration fork).
-// Read those through misterWindows() below instead.
+// The three scheduled lights, and deliberately nothing else. Fan assist
+// folds over exactly these three (§5a), and there are now two other
+// `*_ranges` arrays that must never join that fold:
+//
+//   - `mister_ranges` (§4a) — on 0.28.0 it carries an always-false `fan`
+//     key, and 0.29.0 dropped the key outright. Nor is it the same shape any
+//     more (§4a's duration fork). Read it through misterWindows() below.
+//   - `fan_ranges` (§5b, firmware 0.33.0+) — never carries the key at all,
+//     because the fan can't assist itself. It is its own fourth term in the
+//     fan formula, not part of fan assist. Read it through fanWindows().
+//
+// Which is the whole argument against a reducer that folds over "every
+// `*_ranges` array" generically. That shortcut has been wrong-but-quiet
+// twice already, and `fan_ranges` makes it quiet a third time in a way that
+// actually costs an answer: a fold of `r.fan AND in_window(r)` reads
+// `undefined` on every fan window, so the whole §5b term evaluates false and
+// simply disappears — which is precisely the false positive §5b exists to
+// prevent. `w.fan` failing to compile is what stops that.
 export type LightRole = 'day_light' | 'uvb' | 'basking';
 
 const SCALARS: Record<LightRole, { on: keyof ProfileConfig; off: keyof ProfileConfig }> = {
@@ -101,6 +113,37 @@ export function misterWindows(profileConfig: ProfileConfig | null): MisterWindow
 
   // Key presence, not devices.fw_version — same reasoning as lightWindows().
   const ranges = profileConfig.mister_ranges;
+  return Array.isArray(ranges) ? ranges : [];
+}
+
+/**
+ * The scheduled fan windows to be OR'd over for §5b's `fan_window` term.
+ *
+ * `null` means this snapshot says nothing at all (no config). Everything
+ * else is a list, `[]` included: an absent `fan_ranges` key is a pre-0.33.0
+ * device, and §5b specifies that as `[]` rather than "unknown" — the
+ * three-term formula is exactly right there. Same key-presence detection,
+ * no version gate, no scalar fallback (none exists), and the same caveat as
+ * the mister's: "firmware predates the feature" and "the keeper scheduled
+ * none" are indistinguishable, which is fine for the decision logic and
+ * worth remembering before rendering either as a statement about the
+ * device. Unlike the mister, `[]` is the overwhelmingly common answer —
+ * 0.33.0 ships the array empty on every device until a keeper fills it.
+ *
+ * Windows are unnormalized, exactly like the lighting and mister ones —
+ * unsorted, possibly overlapping, possibly wrapping past midnight. There is
+ * no shape fork here: a fan window is always an `on`/`off` pair of
+ * minute-resolution clock times, read with §6's in_window.
+ *
+ * These do NOT carry a `fan` assist flag and must not be folded into
+ * `fan_assist` — see the LightRole comment above and §5b. They are a
+ * separate term in the same OR.
+ */
+export function fanWindows(profileConfig: ProfileConfig | null): FanWindow[] | null {
+  if (!profileConfig) return null;
+
+  // Key presence, not devices.fw_version — same reasoning as lightWindows().
+  const ranges = profileConfig.fan_ranges;
   return Array.isArray(ranges) ? ranges : [];
 }
 
