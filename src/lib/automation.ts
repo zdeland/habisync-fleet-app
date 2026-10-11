@@ -22,6 +22,11 @@
 // 0.30.0-0.33.0. So `decision.fan` and `decision.mist` are each the climate
 // half alone. See their comments.
 //
+// Firmware 0.35.0 added a sensor trust gate per channel (§3a, §4b), which
+// IS implemented below and pinned by the fixture's fault scenarios — with
+// one caveat for anything replaying real telemetry, explained above
+// temperaturePlausible().
+//
 // The mister's clock requirement is strictly harder than the lights': a
 // 0.29.0+ spike is a start plus a duration in seconds, as short as 5, so
 // its term needs SECONDS-resolution local time where every other rule here
@@ -30,6 +35,37 @@
 
 export const TEMP_HYSTERESIS_C = 1.0;
 export const HUMIDITY_HYSTERESIS_PCT = 3.0;
+
+// Sensor trust gates, firmware 0.35.0+ (automation-rules.md §3a, §4b) —
+// mirrors ClimateController::updateTemperatureTrust()/updateHumidityTrust()
+// and the constants in the firmware's src/Reptile.h. The two channels'
+// constants deliberately differ; don't copy one set across to the other:
+// 0.0 °C is a real reading where 0.0 %RH is a dead channel, and air
+// temperature answers a heater over minutes where %RH answers a mister in
+// seconds.
+export const TEMP_PLAUSIBLE_MIN_C = -40.0;
+export const TEMP_PLAUSIBLE_MAX_C = 125.0;
+export const HEAT_NO_RISE_EVAL_LIMIT = 20;
+export const TEMP_RISE_EPSILON_C = 0.3;
+export const HUMIDITY_PLAUSIBLE_MIN_PCT = 1.0;
+export const HUMIDITY_PLAUSIBLE_MAX_PCT = 100.0;
+export const MIST_NO_RISE_EVAL_LIMIT = 2;
+export const HUMIDITY_RISE_EPSILON_PCT = 1.0;
+
+// The watchdog limits above count the device's evaluations, which run every
+// 30s — not telemetry rows, which arrive every 60s. Fed telemetry, the
+// simulated watchdogs fire at twice the device's real window (and the
+// mist one has no rows to measure across at all, §4b), so only the fixture
+// replay should let them run. Everything replaying real telemetry passes
+// the fault state it read from the device's own tag='sensor' log rows
+// instead — see FaultOverride and src/lib/sensorFaults.ts.
+export function temperaturePlausible(tempC: number | null): boolean {
+  return tempC != null && tempC >= TEMP_PLAUSIBLE_MIN_C && tempC <= TEMP_PLAUSIBLE_MAX_C;
+}
+
+export function humidityPlausible(hum: number | null): boolean {
+  return hum != null && hum >= HUMIDITY_PLAUSIBLE_MIN_PCT && hum <= HUMIDITY_PLAUSIBLE_MAX_PCT;
+}
 
 export type ClimateProfile = {
   tempLow: number;
@@ -45,6 +81,19 @@ export type ClimateState = {
   mist: boolean;
   tempTrigger: boolean; // Fan's temperature-driven half (independent of humTrigger)
   humTrigger: boolean; // Fan's humidity-driven half
+  // §3a/§4b latches. A fault is device state that clears only on a rise
+  // past where it latched, a reboot, or automation going off -> on.
+  tempFaulted: boolean;
+  tempAtFault: number;
+  heatNoRiseEvals: number;
+  tempAtHeatStart: number;
+  humFaulted: boolean;
+  humAtFault: number;
+  mistNoRiseEvals: number;
+  humAtMistStart: number;
+  // The previous step's `enabled`, so an off -> on toggle can clear both
+  // faults the way the firmware's setEnabled() does.
+  enabled: boolean;
 };
 
 export const INITIAL_CLIMATE_STATE: ClimateState = {
@@ -52,7 +101,84 @@ export const INITIAL_CLIMATE_STATE: ClimateState = {
   mist: false,
   tempTrigger: false,
   humTrigger: false,
+  tempFaulted: false,
+  tempAtFault: 0,
+  heatNoRiseEvals: 0,
+  tempAtHeatStart: 0,
+  humFaulted: false,
+  humAtFault: 0,
+  mistNoRiseEvals: 0,
+  humAtMistStart: 0,
+  enabled: false,
 };
+
+// Fault state read from the device's own log rows rather than simulated —
+// see the note above temperaturePlausible(). On firmware < 0.35.0 the gates
+// don't exist and nothing writes the rows, so both are simply false.
+export type FaultOverride = { temp: boolean; hum: boolean };
+
+function updateTemperatureTrust(s: ClimateState, tempC: number): void {
+  const plausible = temperaturePlausible(tempC);
+  if (s.tempFaulted) {
+    if (plausible && tempC >= s.tempAtFault + TEMP_RISE_EPSILON_C) {
+      s.tempFaulted = false;
+      s.tempAtFault = 0;
+      s.heatNoRiseEvals = 0;
+    }
+    return;
+  }
+  if (!plausible) {
+    s.tempFaulted = true;
+    s.tempAtFault = TEMP_PLAUSIBLE_MIN_C;
+    s.heatNoRiseEvals = 0;
+    return;
+  }
+  // s.heat is still the previous evaluation's decision here.
+  if (!s.heat) {
+    s.heatNoRiseEvals = 0;
+  } else if (s.heatNoRiseEvals === 0) {
+    s.tempAtHeatStart = tempC;
+    s.heatNoRiseEvals = 1;
+  } else if (tempC >= s.tempAtHeatStart + TEMP_RISE_EPSILON_C) {
+    s.tempAtHeatStart = tempC;
+    s.heatNoRiseEvals = 1;
+  } else if (++s.heatNoRiseEvals > HEAT_NO_RISE_EVAL_LIMIT) {
+    s.tempFaulted = true;
+    s.tempAtFault = tempC;
+    s.heatNoRiseEvals = 0;
+  }
+}
+
+function updateHumidityTrust(s: ClimateState, hum: number): void {
+  const plausible = humidityPlausible(hum);
+  if (s.humFaulted) {
+    if (plausible && hum >= s.humAtFault + HUMIDITY_RISE_EPSILON_PCT) {
+      s.humFaulted = false;
+      s.humAtFault = 0;
+      s.mistNoRiseEvals = 0;
+    }
+    return;
+  }
+  if (!plausible) {
+    s.humFaulted = true;
+    s.humAtFault = 0;
+    s.mistNoRiseEvals = 0;
+    return;
+  }
+  if (!s.mist) {
+    s.mistNoRiseEvals = 0;
+  } else if (s.mistNoRiseEvals === 0) {
+    s.humAtMistStart = hum;
+    s.mistNoRiseEvals = 1;
+  } else if (hum >= s.humAtMistStart + HUMIDITY_RISE_EPSILON_PCT) {
+    s.humAtMistStart = hum;
+    s.mistNoRiseEvals = 1;
+  } else if (++s.mistNoRiseEvals > MIST_NO_RISE_EVAL_LIMIT) {
+    s.humFaulted = true;
+    s.humAtFault = hum;
+    s.mistNoRiseEvals = 0;
+  }
+}
 
 export type ClimateDecision = {
   heat: boolean;
@@ -130,10 +256,12 @@ export function evaluateClimateStep(
   enabled: boolean,
   tempC: number,
   hum: number,
+  // Omit only when replaying climate_vectors.json; see FaultOverride.
+  faults?: FaultOverride,
 ): { state: ClimateState; decision: ClimateDecision } {
   if (!enabled) {
     return {
-      state,
+      state: { ...state, enabled: false },
       decision: {
         heat: state.heat,
         mist: state.mist,
@@ -144,10 +272,31 @@ export function evaluateClimateStep(
     };
   }
 
+  // Trust gates (§3a/§4b), ahead of everything that reads either channel.
+  // Re-enabling automation is the keeper's manual reset for both latches.
+  const trust: ClimateState = { ...state, enabled: true };
+  if (!state.enabled) {
+    Object.assign(trust, {
+      tempFaulted: false, tempAtFault: 0, heatNoRiseEvals: 0,
+      humFaulted: false, humAtFault: 0, mistNoRiseEvals: 0,
+    });
+  }
+  if (faults) {
+    trust.tempFaulted = faults.temp;
+    trust.humFaulted = faults.hum;
+  } else {
+    updateTemperatureTrust(trust, tempC);
+    updateHumidityTrust(trust, hum);
+  }
+
   // Heater (§3): ceiling has no hysteresis; the OFF->ON and ON->OFF
-  // thresholds differ (temp_low_c vs temp_low_c + hysteresis).
+  // thresholds differ (temp_low_c vs temp_low_c + hysteresis). A
+  // temperature fault overrides all of it, the ceiling included — the
+  // ceiling reads the same broken value.
   let heat = state.heat;
-  if (tempC >= profile.tempHigh) {
+  if (trust.tempFaulted) {
+    heat = false;
+  } else if (tempC >= profile.tempHigh) {
     heat = false;
   } else if (!heat && tempC < profile.tempLow) {
     heat = true;
@@ -161,7 +310,9 @@ export function evaluateClimateStep(
   // instantaneous; the schedule term's is the `humTrigger` latch computed
   // further down.
   let mist = state.mist;
-  if (hum >= profile.humidityHigh) {
+  if (trust.humFaulted) {
+    mist = false;
+  } else if (hum >= profile.humidityHigh) {
     mist = false;
   } else if (!mist && hum < profile.humidityLow) {
     mist = true;
@@ -175,22 +326,28 @@ export function evaluateClimateStep(
   // The hysteresis band sits BELOW the ceiling here (tempHigh -
   // hysteresis), a different location than the Heater's own band (tempLow
   // + hysteresis) — don't reuse one dead-band calculation for both.
+  // Each trigger is also dropped while its own channel is distrusted —
+  // which, for temp_trigger, releases §7's UVB cutout too.
   let tempTrigger = state.tempTrigger;
-  if (tempC >= profile.tempHigh) {
+  if (trust.tempFaulted) {
+    tempTrigger = false;
+  } else if (tempC >= profile.tempHigh) {
     tempTrigger = true;
   } else if (tempTrigger && tempC < profile.tempHigh - TEMP_HYSTERESIS_C) {
     tempTrigger = false;
   }
 
   let humTrigger = state.humTrigger;
-  if (hum >= profile.humidityHigh) {
+  if (trust.humFaulted) {
+    humTrigger = false;
+  } else if (hum >= profile.humidityHigh) {
     humTrigger = true;
   } else if (humTrigger && hum < profile.humidityHigh - HUMIDITY_HYSTERESIS_PCT) {
     humTrigger = false;
   }
 
   return {
-    state: { heat, mist, tempTrigger, humTrigger },
+    state: { ...trust, heat, mist, tempTrigger, humTrigger },
     decision: { heat, mist, fan: tempTrigger || humTrigger, tooHot: tempTrigger, tooHumid: humTrigger },
   };
 }

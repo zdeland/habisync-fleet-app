@@ -1,7 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Database, Device, LogRow, ProfileConfig, TelemetryRow } from '@/lib/types';
-import { evaluateClimateStep, INITIAL_CLIMATE_STATE, type ClimateProfile, type ClimateState } from '@/lib/automation';
+import { evaluateClimateStep, INITIAL_CLIMATE_STATE, type ClimateProfile, type ClimateState, type FaultOverride } from '@/lib/automation';
 import { tempRangeC } from '@/lib/units';
+import { faultsAt, sensorFaultEpisodes, type SensorFaultEpisode } from '@/lib/sensorFaults';
 
 export type TimeRange = { from: string; to: string }; // ISO timestamps
 
@@ -15,7 +16,16 @@ export type DeviceTimelineData = {
   events: LogRow[]; // tag='event' rows within the range — outlet overlay + markers
   allLogs: LogRow[]; // every log row within the range, any tag — timeline markers + context panel
   configLogs: LogRow[]; // tag='config' rows, includes the pre-range seed
+  // Firmware 0.35.0's sensor-fault latches, from the device's own
+  // tag='sensor' edge rows (src/lib/sensorFaults.ts). Built from rows
+  // reaching back before the range, so a fault latched before `range.from`
+  // still reads as latched at its start.
+  sensorFaults: SensorFaultEpisode[];
 };
+
+// How far back to look for a fault latched before the range began. Fault
+// and boot rows are rare; this is generous.
+const SENSOR_SEED_ROWS = 50;
 
 export async function getDeviceTimelineData(
   supabase: SupabaseClient<Database>,
@@ -52,6 +62,7 @@ export async function getDeviceTimelineData(
     { data: seedTelemetry, error: seedTelemetryError },
     { data: logsInRange, error: logsError },
     { data: seedConfig, error: seedConfigError },
+    { data: seedSensor, error: seedSensorError },
   ] = await Promise.all([
     supabase
       .from('telemetry')
@@ -84,19 +95,33 @@ export async function getDeviceTimelineData(
       .lt('created_at', range.from)
       .order('created_at', { ascending: false })
       .limit(1),
+    supabase
+      .from('logs')
+      .select('*')
+      .eq('device_id', deviceId)
+      .in('tag', ['sensor', 'boot'])
+      .lt('created_at', range.from)
+      .order('created_at', { ascending: false })
+      .limit(SENSOR_SEED_ROWS),
   ]);
 
   if (telemetryError) throw telemetryError;
   if (seedTelemetryError) throw seedTelemetryError;
   if (logsError) throw logsError;
   if (seedConfigError) throw seedConfigError;
+  if (seedSensorError) throw seedSensorError;
 
   const telemetry = [...(seedTelemetry ?? []), ...(telemetryInRange ?? []).reverse()];
   const allLogs = (logsInRange ?? []).reverse();
   const events = allLogs.filter((row) => row.tag === 'event');
   const configLogs = [...(seedConfig ?? []), ...allLogs.filter((row) => row.tag === 'config')];
 
-  return { device, telemetry, events, allLogs, configLogs };
+  const sensorFaults = sensorFaultEpisodes(
+    [...(seedSensor ?? []), ...configLogs, ...allLogs.filter((row) => row.tag === 'sensor' || row.tag === 'boot')]
+      .sort((a, b) => a.created_at.localeCompare(b.created_at)),
+  );
+
+  return { device, telemetry, events, allLogs, configLogs, sensorFaults };
 }
 
 export type ResolvedConfig = {
@@ -156,13 +181,17 @@ export type ReconstructedState = {
   // guess from the shared outlet state.
   tooHot: boolean | null;
   tooHumid: boolean | null;
+  // Firmware 0.35.0's latches at this instant (automation-rules.md §3a/§4b).
+  // While one stands the device has stopped acting on that channel, so
+  // tooHot/tooHumid read false for it whatever the reading says.
+  sensorFaults: FaultOverride;
 };
 
 // Implements docs/monitoring-webapp-plan.md §5: take the most recent
 // telemetry sample at/before `t` as the base state, then overlay any
 // outlet-transition events between that sample and `t`.
 export function reconstructStateAt(data: DeviceTimelineData, t: string): ReconstructedState {
-  const { device, telemetry, events, allLogs, configLogs } = data;
+  const { device, telemetry, events, allLogs, configLogs, sensorFaults } = data;
 
   let baseTelemetry: TelemetryRow | null = null;
   // Replayed alongside baseTelemetry, in the same pass, so the trigger
@@ -186,7 +215,10 @@ export function reconstructStateAt(data: DeviceTimelineData, t: string): Reconst
       humidityHigh: rowConfig.profileConfig?.hum_high ?? 100,
     };
     const enabled = rowConfig.profileConfig?.enabled ?? false;
-    const result = evaluateClimateStep(climateState, profile, enabled, row.temp_c, row.hum);
+    // Fault state comes from the device's logged edges, never from the
+    // simulated watchdogs — see FaultOverride in automation.ts.
+    const faults = faultsAt(sensorFaults, row.created_at);
+    const result = evaluateClimateStep(climateState, profile, enabled, row.temp_c, row.hum, faults);
     climateState = result.state;
     tooHot = result.decision.tooHot;
     tooHumid = result.decision.tooHumid;
@@ -248,5 +280,6 @@ export function reconstructStateAt(data: DeviceTimelineData, t: string): Reconst
     lastEvent,
     tooHot,
     tooHumid,
+    sensorFaults: faultsAt(sensorFaults, t),
   };
 }

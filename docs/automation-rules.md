@@ -41,6 +41,8 @@ nothing, check this list and then check the section it names.**
 | 0.29.0 | yes — late, four releases after the fact | `mister_ranges` duration shape (§4a-i) |
 | 0.30.0-0.32.0 | yes | Per-array window caps (§6a), reason-string rewrites, `test pulse` (§11) |
 | 0.33.0 | yes | Scheduled fan windows (§5b) |
+| 0.34.0 | no handoff — dashboard-only release | Nothing on the wire; 0.35.0's handoff confirms 0.33.0 and earlier still hold |
+| 0.35.0 | yes — a month late, uncommitted work discarded and redone 2026-10-11 | Sensor trust gates (§3a, §4b), sensor anomaly rules (§11) |
 
 Rows before 0.29.0 are reconstructed from what is demonstrably in this
 document, not from a received-and-filed copy — the ledger starts here, so
@@ -133,6 +135,84 @@ telemetry row in isolation. Replay `telemetry` rows **in chronological
 order**, carrying the previous decision forward, exactly like the on-device
 state machine does.
 
+On firmware 0.35.0+ the whole rule is additionally gated on the
+temperature reading being *trusted* — see §3a. A distrusted reading forces
+`heat = OFF` ahead of every line above, **including the safety ceiling**,
+which is no protection in this failure because it reads the same broken
+value.
+
+### 3a. Temperature-sensor trust gate (firmware 0.35.0+)
+
+A sensor channel can fail without ever failing a read: the SHT30-class part
+keeps answering with well-formed numbers that drift or settle. A
+temperature channel reading *low* is the most dangerous case in this
+document — the thermostat never reaches target, the ceiling never fires,
+and the heater runs with no upper bound. From 0.35.0 `ClimateController`
+keeps a latched temperature fault
+(`ClimateController::updateTemperatureTrust()`, firmware `src/Reptile.cpp`),
+evaluated before anything reads `temp_c`:
+
+```
+plausible = -40.0 <= temp_c <= 125.0     // the SHT30's datasheet range; NaN fails it
+
+if temp_faulted:
+    if plausible and temp_c >= temp_at_fault + 0.3:  clear (counter reset too)
+elif not plausible:
+    temp_faulted = true;  temp_at_fault = -40.0            // detector 1
+elif heat was ON at the previous evaluation:
+    if no_rise_evals == 0:
+        heat_baseline = temp_c;  no_rise_evals = 1         // heat just started
+    elif temp_c >= heat_baseline + 0.3:
+        heat_baseline = temp_c;  no_rise_evals = 1         // it responded
+    elif ++no_rise_evals > 20:
+        temp_faulted = true;  temp_at_fault = temp_c       // detector 2
+else:
+    no_rise_evals = 0
+```
+
+Latching and clearing both reset `no_rise_evals` to 0. While latched:
+**`heat = OFF`** overriding all of §3, and **`temp_trigger = OFF`** in §5 —
+which also releases §7's UVB cutout (`uvb = uvb_window AND NOT
+temp_trigger`), so **don't flag "UVB on while too hot" against a device in
+a temperature fault**. The Mister and `hum_trigger` are untouched; the two
+gates are fully independent.
+
+**Do not copy §4b's constants across.** Two deliberate asymmetries:
+
+- **`temp_c` of `0.0` is not a fault.** `0.0 %RH` is impossible in a live
+  enclosure; `0.0 °C` is a real reading in a cold room, and a false
+  temperature fault switches the *heater* off. Detector 1 is the sensor's
+  datasheet range, tuned for zero false positives.
+- **The watchdog is 20 evaluations (10 minutes), not 2, and its epsilon is
+  0.3 °C, not 1.0.** A heat mat moves air temperature over minutes.
+
+Three things clear the latch: the rise above, a reboot, and automation
+being switched off and back on (`setEnabled()` — the keeper's manual
+reset). Only the first logs a row. With the heater off, `temp_c` usually
+*falls*, so in practice a temperature fault stands until a human steps in —
+which makes it an alert, not a log line (§11).
+
+**In `logs`**, both edges under `tag='sensor'`:
+
+- `level=0`: `Temperature sensor not trusted (<reason>) at <n> C — heater
+  held off until the reading recovers`, `<reason>` being `implausible
+  reading` or `no rise while heating`.
+- `level=2`: `Temperature sensor trusted again at <n> C — heater back under
+  thermostat control`.
+
+While it stands, the Heater's own `tag='event'` rows read `heater held off —
+temperature sensor not trusted (<reason>)`.
+
+**This repo's implementation:** `src/lib/automation.ts` carries both gates
+and passes the fixture's fault scenarios. But the watchdogs count the
+device's 30s evaluations, and replaying 60s telemetry through them fires at
+twice the real window — so anything replaying real data (`timeline.ts`)
+passes the fault state read from those `tag='sensor'` rows instead
+(`FaultOverride`, `src/lib/sensorFaults.ts`), and only the fixture test
+lets the simulated watchdogs run. Detector 2 here *is* roughly recomputable
+from telemetry, since 10 minutes spans ~10 samples; §11's heater rule does
+exactly that, for firmware that doesn't log.
+
 ## 4. Mister (hysteresis humidistat, plus scheduled spikes)
 
 Outlet role: `"Mister"`. Same shape as Heater, humidity-flavored, no unit
@@ -148,6 +228,10 @@ else:                                     mist = <unchanged>
 Call that boolean `humidistat`. It was the entire rule through 0.27.0, and
 is unchanged by everything that follows — same thresholds, same 3.0 %RH
 hysteresis, same ceiling. Since 0.28.0 it is **one of two terms**.
+
+Since 0.35.0 it is also gated on the humidity reading being *trusted* —
+see §4b. A distrusted reading forces `humidistat = OFF`; the scheduled term
+of §4a is left alone.
 
 ### 4a. Scheduled mist windows (firmware 0.28.0+)
 
@@ -331,6 +415,70 @@ the wire format against a real snapshot before building the §11 mister
 anomaly rules on it.** Not confirmed either: the 0.28.0 → 0.29.0 NVS
 migration described above, and the Kasa backend's spike timing (§10a).
 
+## 4b. Humidity-sensor trust gate (firmware 0.35.0+)
+
+The same gate as §3a on the other channel, and the one that has actually
+fired in the field: on 2026-09-15 `hs-da93c8` misted continuously for about
+an hour after its RH channel decayed from 78 %RH to a flat 0.0 over roughly
+two hours, while `temp_c` on the same part tracked normally the whole time.
+(`ClimateController::updateHumidityTrust()`.)
+
+```
+plausible = 1.0 <= hum <= 100.0          // NaN fails this, as intended
+
+if faulted:
+    if plausible and hum >= hum_at_fault + 1.0:  clear (counter reset too)
+elif not plausible:
+    faulted = true;  hum_at_fault = 0.0                    // detector 1
+elif mist was ON at the previous evaluation:
+    if no_rise_evals == 0:
+        mist_baseline = hum;  no_rise_evals = 1            // mist just started
+    elif hum >= mist_baseline + 1.0:
+        mist_baseline = hum;  no_rise_evals = 1            // it responded
+    elif ++no_rise_evals > 2:
+        faulted = true;  hum_at_fault = hum                // detector 2
+else:
+    no_rise_evals = 0
+```
+
+While latched: **`humidistat = OFF`** (§4), and **`hum_trigger = OFF`** (§5)
+— a channel stuck *high* would otherwise vent the enclosure forever.
+**Scheduled mist windows (§4a) still run**: they're clock-driven, bounded
+by `duration_s`, and don't read the sensor. Nothing about the Heater
+changes. Same three ways to clear as §3a.
+
+**Detector 2 is not reproducible from telemetry — don't try.** Its limit of
+2 evaluations at 30s is a 60-second no-rise window (the latch lands ~90s
+after the mister switches on, since the baseline is taken one tick in).
+Telemetry ships every 60s (§10), so the whole window is one sample
+interval, and on a fast latch the Mister may never appear in `outlet_mask`
+at all. Read its outcome from the `logs` rows. The latch is also sticky on a
+*healthy* sensor: an enclosure whose RH climbs slower than ~1 %RH a minute
+at the sensor — large, well ventilated, sensor far from the nozzle — trips
+it, and the enclosure then dries out.
+
+**In `logs`**, `tag='sensor'`:
+
+- `level=0`: `Humidity sensor not trusted (<reason>) at <n> %RH — mister
+  held off until the reading recovers`, `<reason>` being `implausible
+  reading` or `no rise while misting`.
+- `level=2`: `Humidity sensor trusted again at <n> %RH — mister back under
+  humidistat control`.
+
+The Mister's own rows read `mister held off — humidity sensor not trusted
+(<reason>)` while it stands. Neither fault is in `profile_config`; the
+device exposes both on its LAN-only `GET /climate-status` as
+`humidityFault`/`temperatureFault`, which never reaches Supabase.
+
+**Why this repo's outlet-mismatch alert needs no suppression.** The
+handoff warns that a §11 rule comparing a *recomputed* decision against
+`outlet_mask` fires continuously on a faulted device. That rule isn't built
+yet. The rule that is (`computeOutletMismatches`, `src/lib/queries.ts`)
+compares the last *logged* transition against `outlet_mask`, and the device
+logs its own `held off` transition, so the two agree. When the
+recompute-vs-reported rule lands, give it the logged fault state through
+`FaultOverride` — `evaluateClimateStep` already honors it.
+
 ## 5. Fan (safety-ceiling vent, plus fan assist and a fan schedule)
 
 Outlet role: `"Fan"`. Independent of Heater/Mister — the two reactive terms
@@ -350,9 +498,12 @@ fan = temp_trigger OR hum_trigger OR fan_assist OR fan_window
 
 **Four terms as of firmware 0.33.0**, and the last two are clock windows
 rather than sensor readings: `fan_assist` (§5a, 0.27.0+) and `fan_window`
-(§5b, 0.33.0+). Every one of them is purely additive and none of them is
-suppressed by anything, so this really is a plain OR with no interaction to
-model — which is what makes dropping one so easy and so quiet.
+(§5b, 0.33.0+). Every one of them is purely additive, so this really is a
+plain OR — which is what makes dropping one so easy and so quiet. The only
+suppression, since 0.35.0, is on the two reactive terms: a temperature
+fault forces `temp_trigger = OFF` (§3a) and a humidity fault forces
+`hum_trigger = OFF` (§4b), each independently. The two clock terms don't
+read the sensor and are unaffected.
 
 Note the hysteresis band here sits **below the ceiling**
 (`temp_high_c - 1.0`), a different location than the Heater's own band
@@ -925,6 +1076,43 @@ config says it should":
   `temp_trigger` is active — the forced-off override isn't taking effect
   (possible bug or pre-override firmware version). The check is identical
   for both roles; both are suppressed by the same signal (§7, §8).
+- **A latched sensor fault (§3a, §4b) — an alert, not an anomaly.** Any
+  device whose latest `tag='sensor'` fault row on a channel has no recovery
+  row after it, and hasn't rebooted or had automation switched off since,
+  has half its automation disarmed until a human steps in. A temperature
+  fault outranks everything else here (the enclosure goes cold
+  indefinitely); escalate either one once the channel reads below its
+  `*_low` threshold. Implemented: `activeSensorFaults()` in
+  `src/lib/sensorFaults.ts`, shown on the fleet table and device page.
+  These rows are the one place this repo **does** key on message wording —
+  there is no structured field for the latch, and the firmware handoff
+  names this wording as the contract. If it ever changes, the parser stops
+  matching and faults silently stop appearing; re-check
+  `parseSensorEdge()` against every handoff.
+- Heater bit set continuously for well over 10 minutes with `temp_c` flat or
+  falling — on firmware < 0.35.0 an **unbounded runaway heater**, the most
+  dangerous state in this document, since the safety ceiling can't fire
+  against a reading that is itself wrong; on 0.35.0+ it means §3a's gate
+  isn't firing.
+- Mister bit set across several consecutive samples while `hum` is flat or
+  falling — on firmware < 0.35.0 the runaway §4b describes, worth
+  escalating since it floods the enclosure; on 0.35.0+ the gate should have
+  closed it inside ~90s, so seeing it persist means the gate isn't firing.
+- `hum` pinned at exactly `0.0` across consecutive samples while `temp_c`
+  keeps varying — a dead RH channel on a live part, whatever the outlets
+  are doing.
+- `temp_c` bit-identical across many consecutive samples while `hum` varies
+  — a stuck temperature channel. **Neither §3a detector catches this** (a
+  stuck-but-plausible value passes detector 1, and detector 2 only runs
+  while the heater does), so only cloud-side analysis can close it.
+
+  The four telemetry rules above are `detectSensorAnomalies()` in
+  `src/lib/sensorFaults.ts`, shown as device-timeline markers. Thresholds:
+  3 samples at 0.0 %RH, 30 bit-identical samples (telemetry carries 0.1 °C
+  resolution, so a quiet enclosure can legitimately hold one value for a
+  while), heater 15 minutes, mister 3 samples. A gap of more than 6 minutes
+  breaks a streak. The mister rule can also match a long scheduled spike
+  (§4a), which still runs during a fault, so treat it as a hint.
 - A profile/threshold implies an outlet role that has no matching entry in
   `outlet_roles` at all — automation is silently a no-op for that role;
   worth surfacing as a configuration gap, not a live-state anomaly.

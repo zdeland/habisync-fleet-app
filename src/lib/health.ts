@@ -1,6 +1,7 @@
 import type { LogLevel, LogRow, TelemetryRow } from '@/lib/types';
 import { CRITICAL_ERROR_COUNT, ERROR_WINDOW_MS, STALE_AFTER_MS, WARNING_ERROR_COUNT } from '@/lib/queries';
-import type { DeviceTimelineData, TimeRange } from '@/lib/timeline';
+import { resolveConfigAt, type DeviceTimelineData, type TimeRange } from '@/lib/timeline';
+import { detectSensorAnomalies, type SensorAnomalyKind, type SensorFaultEpisode } from '@/lib/sensorFaults';
 
 // Computed purely from data already fetched for the viewed range — not
 // persisted anywhere. Nothing writes these into the device's own `logs`
@@ -126,13 +127,68 @@ function deriveHealthChangeEvents(telemetry: TelemetryRow[], allLogs: LogRow[]):
   return events;
 }
 
+const CHANNEL_LABEL = { temp: 'Temperature', hum: 'Humidity' } as const;
+const END_LABEL = {
+  recovered: 'the reading recovered',
+  reboot: 'a reboot',
+  'automation-off': 'climate automation being switched off',
+} as const;
+
+// Firmware 0.35.0 logs its own fault edges, and those rows already show in
+// the event log. These markers add what the rows can't: a latch ending
+// silently, at a reboot or an automation toggle, with no row of its own.
+function deriveSensorFaultEndEvents(episodes: SensorFaultEpisode[]): HealthEvent[] {
+  return episodes
+    .filter((e) => e.endedAt != null && e.endedBy !== 'recovered')
+    .map((e) => ({
+      id: `sensor-fault-end-${e.channel}-${e.startedAt}`,
+      createdAt: e.endedAt!,
+      level: 2,
+      icon: '🔄',
+      message: `${CHANNEL_LABEL[e.channel]} sensor fault cleared by ${END_LABEL[e.endedBy!]} (latched ${formatDuration(
+        new Date(e.endedAt!).getTime() - new Date(e.startedAt).getTime(),
+      )}, no recovery row logged)`,
+    }));
+}
+
+const ANOMALY_MESSAGE: Record<SensorAnomalyKind, (runaway: boolean) => string> = {
+  'hum-pinned-zero': () => 'Humidity pinned at 0.0 %RH while temperature keeps moving — dead RH channel',
+  'temp-stuck': () =>
+    'Temperature bit-identical for 30+ samples while humidity varies — possibly a stuck channel, which the device cannot detect itself',
+  'heater-no-rise': (runaway) =>
+    runaway
+      ? 'RUNAWAY HEATER: on for 15+ min with temperature flat or falling, on firmware with no sensor gate'
+      : 'Heater on for 15+ min with temperature flat or falling — the 0.35.0 sensor gate should have caught this and did not',
+  'mister-no-rise': (runaway) =>
+    runaway
+      ? 'RUNAWAY MISTER: on across 3+ samples with humidity flat or falling, on firmware with no sensor gate'
+      : 'Mister on across 3+ samples with humidity flat or falling — the 0.35.0 sensor gate should have closed it within ~90s',
+};
+
+function deriveSensorAnomalyEvents(data: DeviceTimelineData): HealthEvent[] {
+  const indexAt = (row: TelemetryRow, role: 'Heater' | 'Mister') =>
+    resolveConfigAt(data.configLogs, data.device, row.created_at).outletRoles.indexOf(role);
+  return detectSensorAnomalies(data.telemetry, data.device.fw_version, indexAt).map((a) => ({
+    id: `sensor-${a.kind}-${a.since}`,
+    createdAt: a.at,
+    level: a.kind === 'temp-stuck' ? 1 : 0,
+    icon: a.runaway ? '🚨' : '🌡️',
+    message: ANOMALY_MESSAGE[a.kind](a.runaway),
+  }));
+}
+
 // Offline/reconnect and health-severity-change markers for the device
 // timeline. Clamped to the visible range: a gap that started before
 // `range.from` (using the seed telemetry row from before the window) still
 // produces its "reconnected" marker if that falls inside the range, but not
 // a "went offline" marker dated before the range starts.
 export function deriveHealthEvents(data: DeviceTimelineData, range: TimeRange): HealthEvent[] {
-  const events = [...deriveOfflineEvents(data.telemetry, range.to), ...deriveHealthChangeEvents(data.telemetry, data.allLogs)];
+  const events = [
+    ...deriveOfflineEvents(data.telemetry, range.to),
+    ...deriveHealthChangeEvents(data.telemetry, data.allLogs),
+    ...deriveSensorFaultEndEvents(data.sensorFaults),
+    ...deriveSensorAnomalyEvents(data),
+  ];
   return events.filter((event) => event.createdAt >= range.from).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 

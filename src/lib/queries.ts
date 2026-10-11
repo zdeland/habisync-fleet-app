@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Database, Device, LogRow, OutletAlertRow, TelemetryRow } from '@/lib/types';
 import { getActiveOutletAlerts, syncOutletAlerts, type AlertSnapshot } from '@/lib/alerts';
+import { activeSensorFaults, type ActiveSensorFault } from '@/lib/sensorFaults';
 
 // devices.last_seen is upserted on a 5-min heartbeat (docs/monitoring-webapp-plan.md §4.1).
 // Exported so src/lib/health.ts's per-timeline offline/severity detection
@@ -55,6 +56,78 @@ export interface DeviceHealth {
   // stale/no-longer-current itself (see docs/outlet-alerts.md), so it's
   // rendered as its own item rather than blended into overall device health.
   activeOutletAlerts: OutletAlertRow[];
+  // Firmware 0.35.0 sensor-fault latches still standing (src/lib/
+  // sensorFaults.ts). Unlike outlet alerts these are live device state
+  // read from its own log rows, not a workflow item a human closes: one
+  // goes away when the device logs a recovery, reboots, or has automation
+  // switched off and on.
+  activeSensorFaults: ActiveSensorFault[];
+}
+
+// logs retention (docs/monitoring-webapp-plan.md §2). A fault older than
+// this has lost its row, and the device has almost certainly rebooted since.
+const LOG_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
+
+// Fault and recovery rows for every device, then — only for the devices
+// with a fault still open — any config row since that switched automation
+// off, which clears the latch without a row of its own. Both are rare, so
+// this stays two small queries however large the fleet gets.
+export async function getActiveSensorFaults(
+  supabase: SupabaseClient<Database>,
+  devices: Device[],
+  latestTelemetryByDevice: Map<string, TelemetryRow>,
+): Promise<Map<string, ActiveSensorFault[]>> {
+  const result = new Map<string, ActiveSensorFault[]>();
+  if (devices.length === 0) return result;
+
+  const { data: edgeRows, error: edgeError } = await supabase
+    .from('logs')
+    .select('*')
+    .in('device_id', devices.map((d) => d.device_id))
+    .eq('tag', 'sensor')
+    .ilike('message', '%sensor%trusted%')
+    .gte('created_at', new Date(Date.now() - LOG_RETENTION_MS).toISOString())
+    .order('created_at', { ascending: false })
+    .limit(1000);
+  if (edgeError) throw edgeError;
+
+  const rowsByDevice = new Map<string, LogRow[]>();
+  for (const row of (edgeRows ?? []).reverse()) {
+    rowsByDevice.set(row.device_id, [...(rowsByDevice.get(row.device_id) ?? []), row]);
+  }
+
+  const evaluate = () => {
+    for (const device of devices) {
+      const rows = rowsByDevice.get(device.device_id);
+      if (!rows) continue;
+      const sorted = [...rows].sort((a, b) => a.created_at.localeCompare(b.created_at));
+      const faults = activeSensorFaults(device, sorted, latestTelemetryByDevice.get(device.device_id) ?? null);
+      if (faults.length > 0) result.set(device.device_id, faults);
+      else result.delete(device.device_id);
+    }
+  };
+  evaluate();
+  if (result.size === 0) return result;
+
+  const earliest = Array.from(result.values())
+    .flat()
+    .reduce((min, f) => (f.startedAt < min ? f.startedAt : min), new Date().toISOString());
+  const { data: disabledRows, error: disabledError } = await supabase
+    .from('logs')
+    .select('*')
+    .in('device_id', Array.from(result.keys()))
+    .eq('tag', 'config')
+    .eq('profile_config->>enabled', 'false')
+    .gte('created_at', earliest)
+    .limit(1000);
+  if (disabledError) throw disabledError;
+  if (!disabledRows?.length) return result;
+
+  for (const row of disabledRows) {
+    rowsByDevice.set(row.device_id, [...(rowsByDevice.get(row.device_id) ?? []), row]);
+  }
+  evaluate();
+  return result;
 }
 
 // A brand-new device routinely reports a mismatch for a few minutes while
@@ -376,7 +449,10 @@ export async function getFleetHealth(supabase: SupabaseClient<Database>): Promis
     ),
   );
 
-  const activeAlertsByDevice = await getActiveOutletAlerts(supabase, deviceIds);
+  const [activeAlertsByDevice, sensorFaultsByDevice] = await Promise.all([
+    getActiveOutletAlerts(supabase, deviceIds),
+    getActiveSensorFaults(supabase, devices, latestTelemetryByDevice),
+  ]);
 
   return devices.map((device) => ({
     device,
@@ -384,5 +460,6 @@ export async function getFleetHealth(supabase: SupabaseClient<Database>): Promis
     recentErrorCount: errorCountByDevice.get(device.device_id) ?? 0,
     isStale: now - new Date(device.last_seen).getTime() > STALE_AFTER_MS,
     activeOutletAlerts: activeAlertsByDevice.get(device.device_id) ?? [],
+    activeSensorFaults: sensorFaultsByDevice.get(device.device_id) ?? [],
   }));
 }

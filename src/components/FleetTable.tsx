@@ -9,6 +9,7 @@ import { GAUGE_COLORS } from '@/lib/gaugeColors';
 import { compareFwVersions } from '@/lib/version';
 import { toggleFavoriteDevice } from '@/app/actions/favorites';
 import type { TelemetryRow, ProfileConfig, OutletAlertRow } from '@/lib/types';
+import type { ActiveSensorFault } from '@/lib/sensorFaults';
 
 // Mirrors the on-device "status check" component (dot + mono one-liner),
 // repurposed here for fleet-level health per docs/style-guide.md §8.
@@ -25,10 +26,24 @@ const STATUS_META = {
 // counts as critical; merely open (detected, not yet triaged) counts as
 // warning, matching the WARNING tier's own "NEEDS ATTENTION" label. See
 // docs/outlet-alerts.md.
-function deriveStatus({ isStale, recentErrorCount, activeOutletAlerts }: DeviceHealth): keyof typeof STATUS_META {
+//
+// A latched firmware 0.35.0 sensor fault has half of the device's
+// automation disarmed until a human steps in (src/lib/sensorFaults.ts). A
+// temperature one is always critical — the heater stays off and the
+// enclosure goes cold — and a humidity one is critical once the enclosure
+// is already drying out below its low threshold.
+function deriveStatus({
+  isStale,
+  recentErrorCount,
+  activeOutletAlerts,
+  activeSensorFaults,
+}: DeviceHealth): keyof typeof STATUS_META {
   const hasEscalatedOutletAlert = activeOutletAlerts.some((alert) => alert.status === 'escalated');
-  if (isStale || recentErrorCount >= CRITICAL_ERROR_COUNT || hasEscalatedOutletAlert) return 'critical';
-  if (recentErrorCount >= WARNING_ERROR_COUNT || activeOutletAlerts.length > 0) return 'warning';
+  const hasCriticalSensorFault = activeSensorFaults.some((fault) => fault.channel === 'temp' || fault.escalated);
+  if (isStale || recentErrorCount >= CRITICAL_ERROR_COUNT || hasEscalatedOutletAlert || hasCriticalSensorFault)
+    return 'critical';
+  if (recentErrorCount >= WARNING_ERROR_COUNT || activeOutletAlerts.length > 0 || activeSensorFaults.length > 0)
+    return 'warning';
   return 'healthy';
 }
 
@@ -185,8 +200,16 @@ function FavoriteToggle({ deviceId, isFavorite }: { deviceId: string; isFavorite
 // are human-managed workflow items (open until someone closes/escalates
 // them via the device page) that can themselves be stale, not a live
 // health signal to blend into HEALTHY/WARNING/CRITICAL above.
-function AttentionCell({ alerts, href }: { alerts: OutletAlertRow[]; href: string }) {
-  if (alerts.length === 0) {
+function AttentionCell({
+  alerts,
+  sensorFaults,
+  href,
+}: {
+  alerts: OutletAlertRow[];
+  sensorFaults: ActiveSensorFault[];
+  href: string;
+}) {
+  if (alerts.length === 0 && sensorFaults.length === 0) {
     return <span className="text-xs text-device-text-tertiary">—</span>;
   }
 
@@ -195,6 +218,14 @@ function AttentionCell({ alerts, href }: { alerts: OutletAlertRow[]; href: strin
 
   return (
     <Link href={href} onClick={(event) => event.stopPropagation()} className="flex w-fit flex-col gap-1">
+      {sensorFaults.map((fault) => (
+        <span
+          key={fault.channel}
+          className="inline-flex w-fit items-center gap-1 rounded border border-device-alert/40 bg-device-alert/10 px-2 py-0.5 font-mono text-[0.7em] font-semibold text-device-alert"
+        >
+          🌡 {fault.channel === 'temp' ? 'Temp' : 'Humidity'} sensor not trusted
+        </span>
+      ))}
       {openCount > 0 && (
         <span className="inline-flex w-fit items-center gap-1 rounded border border-device-heating/40 bg-device-heating/10 px-2 py-0.5 font-mono text-[0.7em] font-semibold text-device-heating">
           ⚠ {openCount} open
@@ -288,9 +319,9 @@ function DeviceCard({ row, isFavorite }: { row: DeviceRow; isFavorite: boolean }
         </div>
       </div>
 
-      {entry.activeOutletAlerts.length > 0 && (
+      {(entry.activeOutletAlerts.length > 0 || entry.activeSensorFaults.length > 0) && (
         <div className="mt-3">
-          <AttentionCell alerts={entry.activeOutletAlerts} href={href} />
+          <AttentionCell alerts={entry.activeOutletAlerts} sensorFaults={entry.activeSensorFaults} href={href} />
         </div>
       )}
 
@@ -367,7 +398,7 @@ function DeviceTable({ rows, favoriteDeviceIds }: { rows: DeviceRow[]; favoriteD
               </div>
             </td>
             <td className="px-4 py-3">
-              <AttentionCell alerts={entry.activeOutletAlerts} href={href} />
+              <AttentionCell alerts={entry.activeOutletAlerts} sensorFaults={entry.activeSensorFaults} href={href} />
             </td>
             <td className="px-4 py-3 text-device-text-secondary">{lastSeenLabel}</td>
             <td className="px-4 py-3 text-device-text-secondary">

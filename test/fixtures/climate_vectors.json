@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden vectors for ClimateController::evaluate() (src/Reptile.cpp). Single source of truth for both this repo's native test (test/test_climate) and the fleet webapp's reimplementation — see docs/automation-rules.md. All temp/hum values are Celsius/%RH, matching ClimateController's native units (and, since the wire-format change in CHANGELOG.md, what Supabase now stores). Each scenario replays its steps in order through ONE ClimateController instance — hysteresis is stateful, steps are not independent.",
+  "_comment": "Golden vectors for ClimateController::evaluate() (src/Reptile.cpp). Single source of truth for both this repo's native test (test/test_climate) and the fleet webapp's reimplementation — see docs/automation-rules.md. All temp/hum values are Celsius/%RH, matching ClimateController's native units (and, since the wire-format change in CHANGELOG.md, what Supabase now stores). Each scenario replays its steps in order through ONE ClimateController instance — hysteresis is stateful, steps are not independent. The humidity-fault scenarios are stateful in a second way: the mist watchdog counts evaluations, so their step COUNT is load-bearing and not just the values.",
   "scenarios": [
     {
       "name": "heater hysteresis + safety ceiling",
@@ -44,6 +44,150 @@
       "enabled": false,
       "steps": [
         { "temp": 10.0, "hum": 90.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluate() returns immediately when disabled, regardless of how extreme the reading is" }
+      ]
+    },
+    {
+      "name": "humidity fault: implausible reading",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 28.0, "hum": 25.0, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "below humidityLow -> mist on, sensor still trusted" },
+        { "temp": 28.0, "hum": 0.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "0.0 %RH is not a dry enclosure, it is a dead channel -> fault latches, mist forced off" },
+        { "temp": 28.0, "hum": 0.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "still zero -> stays latched; this is the runaway the gate exists to stop" },
+        { "temp": 28.0, "hum": 0.5, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "still under HUMIDITY_PLAUSIBLE_MIN -> no recovery" },
+        { "temp": 28.0, "hum": 25.0, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "plausible and risen above the 0.0 fault point -> trusted again, humidistat resumes" }
+      ]
+    },
+    {
+      "name": "humidity fault: mist watchdog on a plausible but dying channel",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 28.0, "hum": 29.0, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "below humidityLow -> mist on; the next step sets the watchdog baseline" },
+        { "temp": 28.0, "hum": 28.8, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog baseline: 28.8 %RH" },
+        { "temp": 28.0, "hum": 28.6, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 2 of 2 — misting, yet the reading only falls" },
+        { "temp": 28.0, "hum": 28.4, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 3 exceeds MIST_NO_RISE_EVAL_LIMIT -> fault latches 60s of no-rise after the baseline, mist forced off" },
+        { "temp": 28.0, "hum": 27.4, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "decaying further is more evidence of failure, not less -> stays latched (needs >= 29.4 to clear)" },
+        { "temp": 28.0, "hum": 29.5, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "risen HUMIDITY_RISE_EPSILON above the 28.4 fault point -> trusted again, humidistat resumes" }
+      ]
+    },
+    {
+      "name": "humidity trust: a responsive channel never trips the watchdog",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 95.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 28.0, "hum": 25.0, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "mist on; watchdog baseline follows on the next step" },
+        { "temp": 28.0, "hum": 25.6, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 1: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 26.2, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 2: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 26.8, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 3: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 27.4, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 4: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 28.0, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 5: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 28.6, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 6: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 29.2, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 7: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 29.8, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 8: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 30.4, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 9: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 31.0, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 10: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 31.6, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 11: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" },
+        { "temp": 28.0, "hum": 32.2, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 12: +0.6 %RH a tick clears the epsilon every other look, so the watchdog rebases and never reaches 2" }
+      ]
+    },
+    {
+      "name": "humidity fault: suppresses the fan's humidity trigger only",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 28.0, "hum": 41.0, "expect": { "heat": false, "mist": false, "fan": true,  "tooHot": false, "tooHumid": true }, "note": "humidity ceiling -> fan on via the humidity trigger" },
+        { "temp": 28.0, "hum": 0.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "channel dies -> humidity trigger dropped with it, fan releases" },
+        { "temp": 33.0, "hum": 0.0, "expect": { "heat": false, "mist": false, "fan": true,  "tooHot": true,  "tooHumid": false }, "note": "temperature is a separate channel -> fan still answers to heat while the fault stands" },
+        { "temp": 28.0, "hum": 0.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "back under the temperature ceiling -> fan off, humidity still distrusted" }
+      ]
+    },
+    {
+      "name": "temperature fault: implausible reading",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 23.00, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "below tempLow -> heat on, sensor still trusted" },
+        { "temp": 0.00, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "0 C is COLD, not broken — unlike 0 %RH it is a real reading, so no fault and the heater keeps working" },
+        { "temp": -50.00, "hum": 35.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "below the SHT30's -40 C floor -> fault latches, heater forced off" },
+        { "temp": -50.00, "hum": 35.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "still out of range -> stays latched" },
+        { "temp": 23.00, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "back inside the sensor's range -> trusted again, thermostat resumes and wants heat" }
+      ]
+    },
+    {
+      "name": "temperature fault: heat watchdog on a plausible but dying channel",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 23.00, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "below tempLow -> heat on; the next step sets the watchdog baseline" },
+        { "temp": 22.90, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog baseline: 22.90 C" },
+        { "temp": 22.89, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 2 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.88, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 3 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.87, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 4 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.86, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 5 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.85, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 6 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.84, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 7 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.83, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 8 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.82, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 9 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.81, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 10 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.80, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 11 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.79, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 12 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.78, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 13 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.77, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 14 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.76, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 15 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.75, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 16 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.74, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 17 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.73, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 18 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.72, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 19 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.71, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "watchdog evaluation 20 of 20 — heating, yet the reading will not climb" },
+        { "temp": 22.70, "hum": 35.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 21 exceeds HEAT_NO_RISE_EVAL_LIMIT -> fault latches after 10 min of heating with no rise, heater forced off" },
+        { "temp": 22.20, "hum": 35.0, "expect": { "heat": false, "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "still falling with the heater off -> stays latched (needs >= 23.00 to clear)" },
+        { "temp": 23.05, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "risen TEMP_RISE_EPSILON above the 22.70 fault point -> trusted again, thermostat resumes" }
+      ]
+    },
+    {
+      "name": "temperature trust: a responsive channel never trips the watchdog",
+      "profile": { "tempLow": 24.0, "tempHigh": 40.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 18.00, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "heat on; watchdog baseline follows on the next step" },
+        { "temp": 18.20, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 1: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 18.40, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 2: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 18.60, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 3: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 18.80, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 4: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 19.00, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 5: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 19.20, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 6: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 19.40, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 7: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 19.60, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 8: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 19.80, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 9: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 20.00, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 10: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 20.20, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 11: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 20.40, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 12: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 20.60, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 13: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 20.80, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 14: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 21.00, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 15: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 21.20, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 16: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 21.40, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 17: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 21.60, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 18: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 21.80, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 19: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 22.00, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 20: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 22.20, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 21: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 22.40, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 22: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 22.60, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 23: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 22.80, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 24: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 23.00, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 25: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" },
+        { "temp": 23.20, "hum": 35.0, "expect": { "heat": true,  "mist": false, "fan": false, "tooHot": false, "tooHumid": false }, "note": "evaluation 26: +0.2 C a tick clears the epsilon every other look, so the watchdog rebases and never reaches 20" }
+      ]
+    },
+    {
+      "name": "temperature fault: heater and temp trigger only, humidity untouched",
+      "profile": { "tempLow": 24.0, "tempHigh": 32.0, "humidityLow": 30.0, "humidityHigh": 40.0 },
+      "enabled": true,
+      "steps": [
+        { "temp": 33.00, "hum": 41.0, "expect": { "heat": false, "mist": false, "fan": true,  "tooHot": true,  "tooHumid": true }, "note": "both ceilings -> fan on for both reasons, heat off, mist off" },
+        { "temp": -50.00, "hum": 41.0, "expect": { "heat": false, "mist": false, "fan": true,  "tooHot": false, "tooHumid": true }, "note": "temperature channel dies -> temp trigger dropped, but the humidity ceiling still holds the fan on" },
+        { "temp": -50.00, "hum": 25.0, "expect": { "heat": false, "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "humidity channel is untouched by a temperature fault -> mist resumes normally, fan releases" },
+        { "temp": 23.00, "hum": 25.0, "expect": { "heat": true,  "mist": true,  "fan": false, "tooHot": false, "tooHumid": false }, "note": "temperature back in range -> trusted again, heater resumes alongside the mister" }
       ]
     }
   ]

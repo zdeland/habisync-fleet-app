@@ -24,6 +24,7 @@ import { HUMIDITY_HYSTERESIS_PCT, TEMP_HYSTERESIS_C } from '@/lib/automation';
 import { GAUGE_COLORS } from '@/lib/gaugeColors';
 import { closeOutletAlert, escalateOutletAlert } from '@/app/devices/[deviceId]/actions';
 import type { OutletAlertHistoryEntry } from '@/lib/alerts';
+import type { ActiveSensorFault } from '@/lib/sensorFaults';
 import type { Preset } from '@/app/devices/[deviceId]/page';
 
 // Recharts needs literal colors for SVG stroke/fill — can't take Tailwind
@@ -213,6 +214,7 @@ function ReadingCard({
   belowOutletOn,
   aboveActive,
   automationEnabled,
+  sensorDistrusted,
   controlStatus,
 }: {
   label: string;
@@ -232,6 +234,10 @@ function ReadingCard({
   // comment on ReconstructedState).
   aboveActive: boolean | null;
   automationEnabled: boolean | null;
+  // Firmware 0.35.0's gate has latched on this channel: the device has
+  // stopped acting on it, so the latched triggers say nothing about the
+  // reading. Compared plainly, like automation being off.
+  sensorDistrusted: boolean;
   controlStatus: { dotClassName: string; label: string };
 }) {
   const hasRange = low != null && high != null;
@@ -250,7 +256,7 @@ function ReadingCard({
   // (or unknown) falls back to a plain, unlatched comparison instead.
   let tone: CardTone = 'neutral';
   if (hasRange && value != null) {
-    if (automationEnabled) {
+    if (automationEnabled && !sensorDistrusted) {
       if (isBelowActive(value, low, hysteresis, belowOutletOn)) tone = 'below';
       else if (aboveActive) tone = 'above';
       else tone = 'good';
@@ -431,6 +437,10 @@ function deriveTempStatus(state: ReconstructedState): { dotClassName: string; la
     return { dotClassName: 'bg-device-disabled', label: 'AUTOMATION STATUS UNKNOWN' };
   }
 
+  if (state.sensorFaults.temp) {
+    return { dotClassName: 'bg-device-alert', label: 'SENSOR NOT TRUSTED — heater held off' };
+  }
+
   const heater = state.outlets.find((outlet) => outlet.role === 'Heater');
   if (heater?.on) {
     return { dotClassName: 'bg-device-heating', label: 'HEATING — heat outlet ON' };
@@ -451,6 +461,10 @@ function deriveHumidityStatus(state: ReconstructedState): { dotClassName: string
     return { dotClassName: 'bg-device-disabled', label: 'AUTOMATION STATUS UNKNOWN' };
   }
 
+  if (state.sensorFaults.hum) {
+    return { dotClassName: 'bg-device-alert', label: 'SENSOR NOT TRUSTED — humidistat held off' };
+  }
+
   const mister = state.outlets.find((outlet) => outlet.role === 'Mister');
   if (mister?.on) {
     return { dotClassName: 'bg-device-heating', label: 'MISTING — mister ON' };
@@ -469,6 +483,7 @@ export default function DeviceTimeline({
   preset,
   retentionWarning,
   outletAlerts,
+  sensorFaults,
   outletAlertHistory,
   isDeviceOffline,
 }: {
@@ -477,6 +492,7 @@ export default function DeviceTimeline({
   preset: Preset | null;
   retentionWarning: string | null;
   outletAlerts: OutletAlertRow[];
+  sensorFaults: ActiveSensorFault[];
   outletAlertHistory: OutletAlertHistoryEntry[];
   isDeviceOffline: boolean;
 }) {
@@ -699,6 +715,7 @@ export default function DeviceTimeline({
 
   return (
     <div className="flex flex-col gap-6">
+      <SensorFaultCard faults={sensorFaults} />
       <AttentionCard items={outletAlerts} deviceId={data.device.device_id} device={data.device} />
 
       {isOfflineAtScrub ? (
@@ -951,6 +968,53 @@ function AttentionCard({ items, deviceId, device }: { items: OutletAlertRow[]; d
   );
 }
 
+// Firmware 0.35.0 sensor-fault latches still standing right now
+// (src/lib/sensorFaults.ts) — independent of the range being viewed. Live
+// device state, not a workflow item: nothing here to close, because the
+// way to clear one is on the device. Renders nothing when none stand.
+function SensorFaultCard({ faults }: { faults: ActiveSensorFault[] }) {
+  if (faults.length === 0) return null;
+
+  return (
+    <section className="rounded-2xl border border-device-alert/40 bg-device-alert/10 p-4 shadow-device sm:p-6">
+      <h2 className="mb-1 flex items-center gap-2 text-[1.1em] font-semibold text-device-alert">
+        <span>🌡️</span> Sensor not trusted
+      </h2>
+      <p className="mb-4 text-[0.8em] text-device-text-secondary">
+        The device stopped trusting a sensor channel and has switched off the automation that reads it. It clears
+        itself only if the reading rises past where it latched — which, with that outlet off, it usually won&apos;t.
+        Check the sensor, then reboot the device or switch climate automation off and back on.
+      </p>
+      <div className="flex flex-col gap-3">
+        {faults.map((fault) => {
+          const isTemp = fault.channel === 'temp';
+          // An implausible-reading latch can log `at nan`.
+          const value = !Number.isFinite(fault.value)
+            ? 'an unreadable value'
+            : isTemp
+              ? `${celsiusToFahrenheit(fault.value).toFixed(1)}°F`
+              : `${fault.value.toFixed(1)}%`;
+          return (
+            <div key={fault.channel} className="rounded-xl bg-device-surface p-4 text-[0.85em]">
+              <div className="font-semibold text-device-text">
+                {isTemp ? 'Temperature — heater held off' : 'Humidity — humidistat held off'}
+                {fault.escalated && (
+                  <span className="ml-2 rounded border border-device-alert/40 px-2 py-0.5 font-mono text-[0.75em] text-device-alert">
+                    ENCLOSURE BELOW TARGET
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 text-device-text-secondary">
+                Since {displayTime(fault.startedAt, null)} · {fault.reason ?? 'unknown reason'} · latched at {value}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 // A wider window than REBOOT_GRACE_MS (which only suppresses detection for
 // the first few minutes) — this is just a display hint, so it stays useful
 // a bit longer than that. Best-effort only: device.uptime_ms/last_seen
@@ -1096,6 +1160,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
           belowOutletOn={heater?.on ?? null}
           aboveActive={state.tooHot}
           automationEnabled={state.automationEnabled}
+          sensorDistrusted={state.sensorFaults.temp}
           controlStatus={deriveTempStatus(state)}
         />
         <ReadingCard
@@ -1111,6 +1176,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
           belowOutletOn={mister?.on ?? null}
           aboveActive={state.tooHumid}
           automationEnabled={state.automationEnabled}
+          sensorDistrusted={state.sensorFaults.hum}
           controlStatus={deriveHumidityStatus(state)}
         />
       </div>

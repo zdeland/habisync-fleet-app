@@ -4,7 +4,8 @@ import AutoRefresh from '@/components/AutoRefresh';
 import { requireUser } from '@/lib/supabase/auth';
 import { createClient, isSupabaseConfigured } from '@/lib/supabase/server';
 import { getDeviceTimelineData } from '@/lib/timeline';
-import { getOutletAttention, STALE_AFTER_MS } from '@/lib/queries';
+import { getActiveSensorFaults, getOutletAttention, STALE_AFTER_MS } from '@/lib/queries';
+import type { ActiveSensorFault } from '@/lib/sensorFaults';
 import { getActiveOutletAlerts, getOutletAlertHistory, syncOutletAlerts, type OutletAlertHistoryEntry } from '@/lib/alerts';
 import type { OutletAlertRow } from '@/lib/types';
 import DeviceTimeline from '@/components/DeviceTimeline';
@@ -57,7 +58,20 @@ export default async function DeviceTimelinePage({
 
   let outletAlerts: OutletAlertRow[];
   let outletAlertHistory: OutletAlertHistoryEntry[];
+  let sensorFaults: ActiveSensorFault[] = [];
   if (supabase) {
+    // Current state, whatever range is being viewed — so the escalation
+    // check needs the device's latest sample, not the range's last one.
+    const { data: latest, error: latestError } = await supabase
+      .from('telemetry')
+      .select('*')
+      .eq('device_id', data.device.device_id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (latestError) throw latestError;
+    const latestByDevice = new Map(latest?.length ? [[data.device.device_id, latest[0]]] : []);
+    sensorFaults = (await getActiveSensorFaults(supabase, [data.device], latestByDevice)).get(data.device.device_id) ?? [];
+
     const { mismatches: outletAttention, checkedOutletIndexes } = await getOutletAttention(supabase, data.device);
     const snapshots = outletAttention.map((item) => ({
       outletIndex: item.outletIndex,
@@ -104,6 +118,7 @@ export default async function DeviceTimelinePage({
           preset={activePreset}
           retentionWarning={retentionWarning}
           outletAlerts={outletAlerts}
+          sensorFaults={sensorFaults}
           outletAlertHistory={outletAlertHistory}
           isDeviceOffline={isDeviceOffline}
         />
