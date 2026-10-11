@@ -129,25 +129,30 @@ const PAGE_SIZE = 1000;
 
 // Every telemetry row in range, newest-first, up to `rowLimit`. The first
 // page also asks for an exact count, so the rest can be fetched in parallel
-// rather than one round trip after another.
-async function fetchTelemetryPages(
+// rather than one round trip after another. `probesOnly` keeps just the
+// per-port rows (firmware 1.3.0+), served by the telem_dev_port_time index.
+export async function fetchTelemetryPages(
   supabase: SupabaseClient<Database>,
   deviceId: string,
   range: TimeRange,
   rowLimit: number,
+  { probesOnly = false }: { probesOnly?: boolean } = {},
 ): Promise<{ data: TelemetryRow[] | null; error: Error | null }> {
-  const page = (from: number, count?: 'exact') =>
-    supabase
+  const page = (from: number, count?: 'exact') => {
+    let query = supabase
       .from('telemetry')
       .select('*', count ? { count } : undefined)
       .eq('device_id', deviceId)
       .gte('created_at', range.from)
-      .lte('created_at', range.to)
+      .lte('created_at', range.to);
+    if (probesOnly) query = query.not('port', 'is', null);
+    return query
       // id breaks created_at ties: a batch upload stamps every row in it
       // with the same created_at, and paging needs a total order.
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
       .range(from, from + PAGE_SIZE - 1);
+  };
 
   const first = await page(0, 'exact');
   if (first.error) return { data: null, error: first.error };

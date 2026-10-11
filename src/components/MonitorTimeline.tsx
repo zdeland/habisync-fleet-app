@@ -46,7 +46,7 @@ import type { Preset } from '@/app/devices/[deviceId]/page';
 // validated against the card surface (#1D3A57): all checks pass, worst
 // adjacent CVD ΔE 8.4. The port-less series is a 1.0-1.2 unit's first
 // tank, which is port 0 — so it takes port 0's color.
-const PORT_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500'];
+export const PORT_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500'];
 
 function colorFor(port: SeriesPort): string {
   return PORT_COLORS[port ?? 0] ?? PORT_COLORS[0];
@@ -320,7 +320,12 @@ export default function MonitorTimeline({
       {isDeviceOffline && <OfflineNotice lastSeen={data.device.last_seen} />}
 
       <section className="rounded-2xl bg-device-card p-4 shadow-device sm:p-6">
-        <h2 className="mb-4 text-[1.1em] font-medium text-device-text">Tanks</h2>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-[1.1em] font-medium text-device-text">Tanks</h2>
+          <Link href={`/devices/${data.device.device_id}/probe-test`} className="text-sm text-device-accent hover:underline">
+            Probe cap tests →
+          </Link>
+        </div>
         {cardPorts.length === 0 ? (
           <p className="text-sm text-device-text-secondary">No tanks configured and no probe readings in this range.</p>
         ) : (

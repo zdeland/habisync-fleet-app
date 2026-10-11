@@ -43,7 +43,7 @@ nothing, check this list and then check the section it names.**
 | 0.33.0 | yes | Scheduled fan windows (§5b) |
 | 0.34.0 | no handoff — dashboard-only release | Nothing on the wire; 0.35.0's handoff confirms 0.33.0 and earlier still hold |
 | 0.35.0 | yes — a month late, uncommitted work discarded and redone 2026-10-11 | Sensor trust gates (§3a, §4b), sensor anomaly rules (§11) |
-| 1.0.0-1.3.0 | yes, 2026-10-11 — first handoff for the HabiSync 1.0 line | Per-probe telemetry, tanks, the line split (§12). Probe cap test view not built |
+| 1.0.0-1.3.0 | yes, 2026-10-11 — first handoff for the HabiSync 1.0 line | Per-probe telemetry, tanks, the line split, the probe cap test view (§12) |
 
 Rows before 0.29.0 are reconstructed from what is demonstrably in this
 document, not from a received-and-filed copy — the ledger starts here, so
@@ -1253,7 +1253,43 @@ rows (`tag='alert'`) are planned firmware-side but don't exist yet.
   stuck temperature) do, per probe.
 - Climate alert emails are per tank (`climate_alerts.port`,
   `add_climate_alert_port_2026-10-11.sql`).
-- **Not built:** the probe cap test view (handoff §6). Its maths are in the
-  firmware repo's `probe-cap-test.md` and `scripts/probe_test_report.py`,
-  whose output is the reference for checking one.
+- The probe cap test view: `/devices/<id>/probe-test`, linked from the
+  device page (§12e).
+
+### 12e. The probe cap test (1.3.0)
+
+A 1-24 h bench test of how a probe's cap changes its readings: an uncapped
+baseline, then one cap moved from probe to probe, optionally a final
+all-capped phase, with a person entering reference readings each phase.
+The protocol is the firmware repo's `docs/probe-cap-test.md`; its
+`scripts/probe_test_report.py` is the reference implementation.
+
+`src/lib/probeTest.ts` is a function-for-function port of that script —
+same window (start to `end`/`stop`, or now), same 10-minute settling mask
+(left out of a probe's own results but still counted in that minute's group
+mean and capped fraction), same per-minute grouping by sample time, same
+fit, same nearest-minute reference matching. **Parity is pinned**: on
+2026-10-11 the unmodified script was run, through a harness feeding it rows
+instead of Supabase, on both the live `hs-f0a798` session and a synthetic
+session built to be awkward (unequal effects, an all-capped phase, a probe
+dropping out, a backlog under one `created_at`), and every number matched.
+`test/probeTest.test.ts` carries the synthetic session and the script's
+output for it. Change the maths only together with the script.
+
+Sessions pair each `start` with the `end`/`stop` for the same `s`; a `stop`
+is abandoned (usually a restart) and hidden by default; a `start` with
+neither is running, or — an hour past its planned end — stopped reporting.
+
+**A limitation of the method, reported back to the firmware team.** The
+handoff and `probe-cap-test.md` say the fit recovers each probe's cap
+effect "exactly, whatever the schedule". It does only when every probe's
+cap has the **same** effect. The model assumes the group mean moves by
+the probe's own effect times the fraction capped; it actually moves by the
+mean of the *capped probes'* effects. Measured on noise-free data with the
+firmware's own schedule: true effects of 0.5 / 0.8 / 0.2 °C come back as
+0.49 / 0.65 / 0.35 (all-capped phase or not) — pulled toward their mean,
+which is exactly the difference the test exists to find. Fitting every
+probe's effect jointly (offset_i = a_i + Σ_j e_j·(δ_ij − 1/n)·c_j) would be
+exact for any schedule. The view says the fit is exact only for equal
+effects rather than claiming otherwise.
 
