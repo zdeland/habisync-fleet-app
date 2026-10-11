@@ -270,7 +270,7 @@ export type FavoriteDeviceRow = {
   created_at: string;
 };
 
-export type ClimateAlertMetric = 'temp' | 'humidity';
+export type ClimateAlertMetric = 'temp' | 'humidity' | 'temp_sensor' | 'humidity_sensor';
 export type ClimateAlertStatus = 'open' | 'resolved';
 
 // Webapp-owned workflow table backing the favorite-device climate-alert

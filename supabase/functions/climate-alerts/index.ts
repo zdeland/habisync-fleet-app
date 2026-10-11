@@ -18,6 +18,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
 import { sendEmail } from '../_shared/sendEmail.ts';
 import { detectSustainedCondition, outOfRange, SUSTAINED_OUT_OF_RANGE_MS, MAX_SAMPLE_GAP_MS } from '../_shared/climateDetection.ts';
+import { sensorFaultEpisodes, standingFaults, type SensorChannel, type SensorFaultEpisode } from '../_shared/sensorFaultEdges.ts';
 
 // Mirrors src/lib/queries.ts's STALE_AFTER_MS (HEARTBEAT_INTERVAL_MS * 2,
 // 10 min) — a device that hasn't heartbeated in this long is presumed fully
@@ -93,6 +94,59 @@ function emailBodyForResolved(deviceName: string, deviceId: string, metricLabel:
     ``,
     `Current reading: ${formatValue(value, unit)}`,
     `Target range: ${formatValue(low, unit)} – ${formatValue(high, unit)}`,
+    ``,
+    `${appBaseUrl}/devices/${deviceId}`,
+  ].join('\n');
+}
+
+// Firmware 0.35.0 sensor-fault alerts (docs/climate-alerts.md, "Sensor
+// faults"; docs/automation-rules.md §3a/§4b). Not a range check: a fault is
+// a latch the device logs itself, so it opens the moment the device says so
+// and resolves when it stands no longer — read through the same
+// _shared/sensorFaultEdges.ts the app uses (src/lib/sensorFaults.ts).
+const SENSOR_METRICS: { channel: SensorChannel; key: string; label: string; outlet: string }[] = [
+  { channel: 'temp', key: 'temp_sensor', label: 'Temperature sensor', outlet: 'heater' },
+  { channel: 'hum', key: 'humidity_sensor', label: 'Humidity sensor', outlet: 'humidistat (mister)' },
+];
+
+// Mirrors src/lib/queries.ts's LOG_RETENTION_MS — logs are kept 60 days.
+const LOG_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
+
+const FAULT_END_LABEL: Record<string, string> = {
+  recovered: 'the reading recovered',
+  reboot: 'the device rebooting',
+  'automation-off': 'climate automation being switched off',
+};
+
+function emailBodyForSensorFault(
+  deviceName: string, deviceId: string, metric: (typeof SENSOR_METRICS)[number], fault: SensorFaultEpisode,
+  belowTarget: boolean, appBaseUrl: string,
+): string {
+  const latched = Number.isFinite(fault.value)
+    ? fault.channel === 'temp' ? formatValue(celsiusToFahrenheit(fault.value), '°F') : formatValue(fault.value, '%')
+    : 'an unreadable value';
+  return [
+    `${deviceName} (${deviceId}) has stopped trusting its ${metric.label.toLowerCase()} and switched its ${metric.outlet} off.`,
+    ``,
+    `Since: ${fault.startedAt}`,
+    `Reason: ${fault.reason ?? 'unknown'}, at ${latched}`,
+    ...(belowTarget
+      ? [``, `The enclosure is already below its target ${fault.channel === 'temp' ? 'temperature' : 'humidity'}, with nothing correcting it.`]
+      : []),
+    ``,
+    `The device only clears this itself if the reading rises past where it latched, which with the ${metric.outlet} off it usually won't.`,
+    `Check the sensor, then reboot the device or switch climate automation off and back on.`,
+    ``,
+    `${appBaseUrl}/devices/${deviceId}`,
+  ].join('\n');
+}
+
+function emailBodyForSensorResolved(
+  deviceName: string, deviceId: string, metric: (typeof SENSOR_METRICS)[number], endedBy: string, appBaseUrl: string,
+): string {
+  return [
+    `${deviceName} (${deviceId})'s ${metric.label.toLowerCase()} is trusted again — cleared by ${FAULT_END_LABEL[endedBy] ?? endedBy}.`,
+    `The ${metric.outlet} is back under automatic control.`,
     ``,
     `${appBaseUrl}/devices/${deviceId}`,
   ].join('\n');
@@ -220,6 +274,98 @@ Deno.serve(async (req: Request) => {
 
   const now = Date.now();
 
+  async function sweepSensorFaults(
+    device: { device_id: string; name: string; last_seen: string; uptime_ms: number; profile_config: any },
+    favoriters: { userId: string; email: string }[],
+    latest: { temp_c: number; hum: number } | null,
+  ) {
+    const deviceId = device.device_id;
+    const { data: edgeRows, error: edgeError } = await supabase
+      .from('logs')
+      .select('tag, message, created_at')
+      .eq('device_id', deviceId)
+      .eq('tag', 'sensor')
+      .ilike('message', '%sensor%trusted%')
+      .gte('created_at', new Date(now - LOG_RETENTION_MS).toISOString())
+      .order('created_at', { ascending: true })
+      .limit(500);
+    if (edgeError) throw edgeError;
+
+    const bootAtMs = new Date(device.last_seen).getTime() - device.uptime_ms;
+    const automationEnabled = device.profile_config?.enabled !== false;
+    let rows = edgeRows ?? [];
+    let episodes = sensorFaultEpisodes(rows);
+    let standing = standingFaults(episodes, bootAtMs, automationEnabled);
+
+    // Automation switched off since a fault clears it with no row of its
+    // own — only worth a query when something is still standing.
+    if (standing.length > 0) {
+      const earliest = standing.reduce((min, f) => (f.startedAt < min ? f.startedAt : min), standing[0].startedAt);
+      const { data: disabledRows, error: disabledError } = await supabase
+        .from('logs')
+        .select('tag, message, created_at, profile_config')
+        .eq('device_id', deviceId)
+        .eq('tag', 'config')
+        .eq('profile_config->>enabled', 'false')
+        .gte('created_at', earliest)
+        .limit(100);
+      if (disabledError) throw disabledError;
+      if (disabledRows?.length) {
+        rows = [...rows, ...disabledRows].sort((a, b) => a.created_at.localeCompare(b.created_at));
+        episodes = sensorFaultEpisodes(rows);
+        standing = standingFaults(episodes, bootAtMs, automationEnabled);
+      }
+    }
+
+    for (const metric of SENSOR_METRICS) {
+      const fault = standing.find((f) => f.channel === metric.channel);
+      const existing = openAlertByKey.get(`${deviceId}:${metric.key}`);
+      const subject = `${device.name}: ${metric.label.toLowerCase()} not trusted — ${metric.outlet} off`;
+
+      const range = metric.channel === 'temp'
+        ? tempRangeC(device.profile_config)
+        : device.profile_config?.hum_low != null && device.profile_config?.hum_high != null
+          ? { low: device.profile_config.hum_low, high: device.profile_config.hum_high }
+          : null;
+      const reading = latest ? (metric.channel === 'temp' ? latest.temp_c : latest.hum) : null;
+      const belowTarget = range != null && reading != null && reading < range.low;
+
+      if (fault && !existing) {
+        const { data: inserted, error: insertError } = await supabase
+          .from('climate_alerts')
+          .insert({
+            device_id: deviceId,
+            metric: metric.key,
+            status: 'open',
+            out_of_range_since: fault.startedAt,
+            // The latched value can be NaN (an implausible-reading latch),
+            // which JSON can't carry; the latest reading always can.
+            observed_value: reading != null && Number.isFinite(reading) ? reading : 0,
+            low_threshold: range?.low ?? 0,
+            high_threshold: range?.high ?? 0,
+          })
+          .select('id')
+          .single();
+        if (insertError && insertError.code !== '23505') throw insertError;
+        if (!inserted) continue;
+        const body = emailBodyForSensorFault(device.name, deviceId, metric, fault, belowTarget, appBaseUrl);
+        await notifyOpen(inserted.id, subject, body, favoriters);
+      } else if (fault && existing) {
+        const body = emailBodyForSensorFault(device.name, deviceId, metric, fault, belowTarget, appBaseUrl);
+        await notifyOpen(existing.id, subject, body, favoriters);
+      } else if (!fault && existing) {
+        const last = episodes.filter((e) => e.channel === metric.channel).at(-1);
+        const endedBy = last?.endedBy ?? (automationEnabled ? 'reboot' : 'automation-off');
+        const body = emailBodyForSensorResolved(device.name, deviceId, metric, endedBy, appBaseUrl);
+        await notifyResolve(existing.id, `${device.name}: ${metric.label.toLowerCase()} trusted again`, body, favoriters);
+        await supabase
+          .from('climate_alerts')
+          .update({ status: 'resolved', resolved_at: new Date().toISOString() })
+          .eq('id', existing.id);
+      }
+    }
+  }
+
   for (const deviceId of deviceIds) {
     const favoriters = favoritersByDevice.get(deviceId) ?? [];
     if (favoriters.length === 0) continue;
@@ -250,6 +396,16 @@ Deno.serve(async (req: Request) => {
       .order('created_at', { ascending: false })
       .limit(60);
     if (telemetryError) throw telemetryError;
+
+    // Isolated so the sensor path can never take the range alerts down with
+    // it — e.g. before supabase/add_sensor_fault_alert_metrics_2026-10-11.sql
+    // has been run, its insert fails the metric CHECK constraint.
+    try {
+      await sweepSensorFaults(device, favoriters, telemetryRows?.[0] ?? null);
+    } catch (sensorError) {
+      console.error(`sensor-fault sweep failed for ${deviceId}:`, sensorError);
+    }
+
     if (!telemetryRows || telemetryRows.length === 0) continue;
 
     for (const metric of METRICS) {

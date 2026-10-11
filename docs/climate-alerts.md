@@ -140,6 +140,45 @@ on `climate_alerts` are a point-in-time snapshot for the email body only,
 so widening a species profile's range correctly resolves an open alert on
 the very next pass with no special-casing needed.
 
+## Sensor faults (firmware 0.35.0+)
+
+The first non-range alert type, two metrics: `temp_sensor` and
+`humidity_sensor`. From 0.35.0 a device that stops trusting a sensor
+channel latches a fault and switches off the automation that reads it — the
+heater for temperature, the humidistat for humidity (docs/automation-rules.md
+§3a, §4b). On a healthy sensor that latch never clears itself, because
+recovery needs a rise the now-disabled outlet isn't producing, so a
+temperature fault leaves the enclosure going cold until a human steps in.
+That is what the email is for.
+
+**Detection is not `detectSustainedCondition`.** The latch is device state
+the device logs itself — a `tag='sensor'` row on each edge — so there's no
+streak to wait for: the alert opens on the sweep after the fault row lands,
+and resolves on the sweep after it stops standing. "Standing" means no
+recovery row since, no reboot since (`devices.last_seen - uptime_ms`), and
+automation not switched off since (a `tag='config'` row with
+`profile_config.enabled = false`, or the current snapshot). The parsing and
+the standing rule live in `supabase/functions/_shared/sensorFaultEdges.ts`,
+shared with the app's fleet table and device page through
+`src/lib/sensorFaults.ts`, so the email and the UI can't disagree.
+
+**Columns, reused:** `out_of_range_since` is when the fault latched;
+`observed_value` is the channel's latest reading (the latched value itself
+can be NaN, which JSON can't carry); `low_threshold`/`high_threshold` are
+the target range, or 0 when none is set. The email says when the
+enclosure is already below its low threshold, but there's one email per
+episode — drifting below target later doesn't send another.
+
+**Failure isolation:** the sensor sweep for each device runs in its own
+`try`/`catch`. Run `add_sensor_fault_alert_metrics_2026-10-11.sql` and
+`grant_service_role_logs.sql` before deploying; if the function goes first,
+the sensor path logs an error every sweep while the range alerts carry on.
+
+**Keys on message wording**, unlike every other check in this app: there's
+no structured field for the latch. If the firmware rewords those rows the
+parser stops matching and these alerts silently stop — re-check
+`parseSensorEdge()` against every firmware handoff.
+
 ## Extensibility — adding a new alert type later
 
 **A new range-based metric** (e.g. RSSI signal strength or free heap memory

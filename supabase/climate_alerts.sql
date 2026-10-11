@@ -16,7 +16,10 @@
 create table public.climate_alerts (
   id bigint generated always as identity primary key,
   device_id text not null references public.devices (device_id) on delete cascade,
-  metric text not null check (metric in ('temp', 'humidity')),
+  -- 'temp_sensor'/'humidity_sensor': firmware 0.35.0 sensor-fault latches
+  -- (add_sensor_fault_alert_metrics_2026-10-11.sql), where
+  -- out_of_range_since is when the fault latched.
+  metric text not null check (metric in ('temp', 'humidity', 'temp_sensor', 'humidity_sensor')),
   status text not null default 'open' check (status in ('open', 'resolved')),
 
   -- Lower bound of the contiguous out-of-range streak (walking back from the

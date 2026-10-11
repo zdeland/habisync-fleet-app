@@ -39,7 +39,8 @@ depends on).
 ## Climate alerts — deploy/operate checklist
 
 Emails favoriting users when a device's temp/humidity has been out of
-range for 3+ minutes. See [`docs/climate-alerts.md`](docs/climate-alerts.md)
+range for 3+ minutes, or when a device on firmware 0.35.0+ stops trusting a
+sensor and switches that half of its automation off. See [`docs/climate-alerts.md`](docs/climate-alerts.md)
 for the full design (why this needs a Deno Edge Function + `pg_cron`, the
 detection algorithm, the reconciliation model). This section is just the
 runbook.
@@ -47,9 +48,12 @@ runbook.
 **One-time setup:**
 
 1. Run `supabase/favorite_devices.sql`, `supabase/climate_alerts.sql`,
-   `supabase/climate_alert_notifications.sql`, and
-   `supabase/grant_service_role_climate_alerts.sql` in the Supabase SQL
-   editor.
+   `supabase/climate_alert_notifications.sql`,
+   `supabase/grant_service_role_climate_alerts.sql`, and
+   `supabase/grant_service_role_logs.sql` in the Supabase SQL editor.
+   (An existing install that predates sensor-fault alerts also needs
+   `supabase/add_sensor_fault_alert_metrics_2026-10-11.sql` — run it, and
+   the logs grant, before redeploying the function.)
 2. `supabase login`, then `supabase link --project-ref <ref>`.
 3. `supabase functions deploy climate-alerts`.
 4. Set secrets (values below) with `supabase secrets set KEY=value ...`.
@@ -81,3 +85,10 @@ curl -X POST https://<ref>.supabase.co/functions/v1/climate-alerts \
 ```
 
 Check `supabase functions logs climate-alerts` if no email arrives.
+
+For a sensor-fault alert, insert a `logs` row instead — `tag='sensor'`,
+`level=0`, `message` = `Humidity sensor not trusted (no rise while misting)
+at 28.4 %RH — mister held off until the reading recovers` — timestamped
+after the device's current boot (`last_seen - uptime_ms`), then curl as
+above. Insert a matching `Humidity sensor trusted again at 29.5 %RH — ...`
+row to see the resolve email. A device with automation off never alerts.

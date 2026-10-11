@@ -1,0 +1,30 @@
+-- Grants `service_role` read access to the firmware-owned `logs` table.
+--
+-- Why this is needed: this Supabase project does NOT auto-apply default
+-- privileges to `service_role` on tables — the same gotcha already
+-- documented in grant_service_role_climate_alerts.sql and
+-- docs/known-issues.md. That file granted `devices` and `telemetry` (all
+-- the climate-alerts Edge Function needed) but never `logs`, so any
+-- service_role read of it fails with
+-- `42501 permission denied for table logs`.
+--
+-- What needs it: the climate-alerts sweep's sensor-fault alerts, which read
+-- each favorited device's tag='sensor' rows (firmware 0.35.0 —
+-- docs/climate-alerts.md, "Sensor faults"). Also fleet-wide diagnostics that have to read the device's own
+-- log ledger rather than the browser-facing, RLS-gated path — e.g. counting
+-- `tag='boot'` rows per device to tell a one-off power cycle apart from a
+-- device rebooting repeatedly (docs/known-issues.md, reset_reason is a
+-- sticky per-boot field on `devices` and can't answer this on its own).
+--
+-- `service_role` bypasses RLS (rolbypassrls), so the table GRANT alone is
+-- sufficient; no policies are needed for it. SELECT only — nothing should
+-- ever write to this table but the firmware.
+--
+-- Note: `outlet_alerts` has the same gap (403 to service_role today). Not
+-- granted here because nothing server-side needs it yet; add it the same
+-- way if that changes.
+--
+-- Run this by hand once against the project's SQL editor, same convention
+-- as every other file in this directory. Idempotent — safe to re-run.
+
+grant select on public.logs to service_role;

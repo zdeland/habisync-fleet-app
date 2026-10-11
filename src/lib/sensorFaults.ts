@@ -12,6 +12,12 @@ import type { Device, LogRow, TelemetryRow } from '@/lib/types';
 import type { FaultOverride } from '@/lib/automation';
 import { HUMIDITY_RISE_EPSILON_PCT, TEMP_RISE_EPSILON_C } from '@/lib/automation';
 import { tempRangeC } from '@/lib/units';
+import {
+  sensorFaultEpisodes,
+  standingFaults,
+  type SensorChannel,
+  type SensorFaultEpisode,
+} from '../../supabase/functions/_shared/sensorFaultEdges';
 
 export const SENSOR_GATE_FIRMWARE = '0.35.0';
 
@@ -19,93 +25,15 @@ export function hasSensorGates(fwVersion: string): boolean {
   return compareFwVersions(fwVersion, SENSOR_GATE_FIRMWARE) >= 0;
 }
 
-export type SensorChannel = 'temp' | 'hum';
-
-export type SensorEdge = {
-  channel: SensorChannel;
-  kind: 'fault' | 'recovered';
-  reason: string | null; // 'implausible reading' | 'no rise while misting' | 'no rise while heating'
-  value: number; // the reading the device logged at the edge, °C or %RH
-};
-
-// `Humidity sensor not trusted (no rise while misting) at 28.4 %RH — ...`
-// `Temperature sensor trusted again at 23.1 C — ...`
-// tag='sensor' predates 0.35.0 and carries other messages, so match the
-// edge wording exactly rather than keying off the tag alone.
-const EDGE_PATTERN = /^(Humidity|Temperature) sensor (?:not trusted \(([^)]*)\)|(trusted again)) at (-?[\d.]+|nan)/i;
-
-export function parseSensorEdge(row: Pick<LogRow, 'tag' | 'message'>): SensorEdge | null {
-  if (row.tag !== 'sensor') return null;
-  const match = EDGE_PATTERN.exec(row.message);
-  if (!match) return null;
-  return {
-    channel: match[1].toLowerCase() === 'humidity' ? 'hum' : 'temp',
-    kind: match[3] ? 'recovered' : 'fault',
-    reason: match[2] ?? null,
-    value: Number(match[4]),
-  };
-}
-
-export type FaultEnd = 'recovered' | 'reboot' | 'automation-off';
-
-export type SensorFaultEpisode = {
-  channel: SensorChannel;
-  reason: string | null;
-  value: number;
-  startedAt: string;
-  endedAt: string | null; // null = still latched as of the last row seen
-  endedBy: FaultEnd | null;
-};
-
-// Rows ascending by created_at; any tags — only sensor edges, tag='boot'
-// and tag='config' rows matter. Neither a reboot nor the keeper switching
-// automation off and on again logs a recovery row, and both clear the
-// latch (§4b), so an episode also ends at the first of those after it.
-// Automation going OFF is counted as the end, not the later ON: while it's
-// off the device drives nothing from either channel, and turning it back
-// on clears the fault.
-export function sensorFaultEpisodes(rows: LogRow[]): SensorFaultEpisode[] {
-  const episodes: SensorFaultEpisode[] = [];
-  const open = new Map<SensorChannel, SensorFaultEpisode>();
-
-  const close = (episode: SensorFaultEpisode, at: string, by: FaultEnd) => {
-    episode.endedAt = at;
-    episode.endedBy = by;
-    open.delete(episode.channel);
-  };
-
-  for (const row of rows) {
-    if (row.tag === 'boot') {
-      open.forEach((episode) => close(episode, row.created_at, 'reboot'));
-      continue;
-    }
-    if (row.tag === 'config') {
-      if (row.profile_config?.enabled === false) {
-        open.forEach((episode) => close(episode, row.created_at, 'automation-off'));
-      }
-      continue;
-    }
-    const edge = parseSensorEdge(row);
-    if (!edge) continue;
-    const current = open.get(edge.channel);
-    if (edge.kind === 'recovered') {
-      if (current) close(current, row.created_at, 'recovered');
-      continue;
-    }
-    if (current) continue; // a second fault row inside an open episode adds nothing
-    const episode: SensorFaultEpisode = {
-      channel: edge.channel,
-      reason: edge.reason,
-      value: edge.value,
-      startedAt: row.created_at,
-      endedAt: null,
-      endedBy: null,
-    };
-    episodes.push(episode);
-    open.set(edge.channel, episode);
-  }
-  return episodes;
-}
+export {
+  parseSensorEdge,
+  sensorFaultEpisodes,
+  standingFaults,
+  type FaultEnd,
+  type SensorChannel,
+  type SensorEdge,
+  type SensorFaultEpisode,
+} from '../../supabase/functions/_shared/sensorFaultEdges';
 
 export function faultsAt(episodes: SensorFaultEpisode[], t: string): FaultOverride {
   const latched = (channel: SensorChannel) =>
@@ -129,22 +57,13 @@ export type ActiveSensorFault = SensorFaultEpisode & {
   escalated: boolean;
 };
 
-// `device.last_seen - uptime_ms` is the current boot instant (the same
-// arithmetic as queries.ts's msSinceDeviceBoot). A fault older than that
-// was cleared by the reboot even if no boot row has been read.
-function bootedAfter(device: Device, iso: string): boolean {
-  const bootAtMs = new Date(device.last_seen).getTime() - device.uptime_ms;
-  return bootAtMs > new Date(iso).getTime();
-}
-
 export function activeSensorFaults(
   device: Device,
   rowsAscending: LogRow[], // this device's sensor/boot/config rows
   latestTelemetry: TelemetryRow | null,
 ): ActiveSensorFault[] {
-  if (device.profile_config?.enabled === false) return [];
-  return sensorFaultEpisodes(rowsAscending)
-    .filter((e) => e.endedAt == null && !bootedAfter(device, e.startedAt))
+  const bootAtMs = new Date(device.last_seen).getTime() - device.uptime_ms;
+  return standingFaults(sensorFaultEpisodes(rowsAscending), bootAtMs, device.profile_config?.enabled !== false)
     .map((e) => {
       const config = device.profile_config;
       let escalated = false;
