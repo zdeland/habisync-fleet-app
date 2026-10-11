@@ -20,6 +20,10 @@ create table public.climate_alerts (
   -- (add_sensor_fault_alert_metrics_2026-10-11.sql), where
   -- out_of_range_since is when the fault latched.
   metric text not null check (metric in ('temp', 'humidity', 'temp_sensor', 'humidity_sensor')),
+  -- HabiSync 1.0 (firmware 1.3.0+): the probe port, 0-3, whose tank this
+  -- alert is about. Null for a devkit unit, and for a 1.x unit before
+  -- 1.3.0 (add_climate_alert_port_2026-10-11.sql).
+  port int2,
   status text not null default 'open' check (status in ('open', 'resolved')),
 
   -- Lower bound of the contiguous out-of-range streak (walking back from the
@@ -46,11 +50,11 @@ create table public.climate_alerts (
   -- see that file and docs/climate-alerts.md.
 );
 
--- At most one active alert per (device, metric) — the Edge Function upserts
+-- At most one active alert per (device, metric, port) — the Edge Function upserts
 -- against this every sweep. No 'closed'/'escalated' states here (unlike
 -- outlet_alerts): this lifecycle has no human workflow, just open/resolved.
 create unique index climate_alerts_active_unique
-  on public.climate_alerts (device_id, metric)
+  on public.climate_alerts (device_id, metric, coalesce(port, -1))
   where status = 'open';
 
 grant select on public.climate_alerts to authenticated;

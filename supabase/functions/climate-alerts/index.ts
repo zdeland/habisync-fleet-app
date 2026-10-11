@@ -152,6 +152,55 @@ function emailBodyForSensorResolved(
   ].join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// HabiSync 1.0 (firmware 1.x) per-probe telemetry. Mirrors isMonitorOnly(),
+// tanksOf() and tankForSeries() in src/lib/probes.ts, which this Deno
+// function can't import (it pulls in the app's typed module tree) — keep
+// the two in sync by hand; treat drift as a bug.
+
+type TelemetrySampleRow = { created_at: string; device_time: string | null; port: number | null; temp_c: number; hum: number };
+
+type AlertTarget = {
+  port: number | null;
+  tankName: string | null; // null = the device's own reading (devkit)
+  config: any; // carries temp_low_c/temp_high_c (or _f) and hum_low/hum_high
+  rows: TelemetrySampleRow[]; // newest-first by sample time
+};
+
+function alertKey(deviceId: string, metric: string, port: number | null): string {
+  return `${deviceId}:${metric}:${port ?? ''}`;
+}
+
+function isMonitorOnly(device: { fw_version: string; profile_config: any }): boolean {
+  if (device.profile_config?.board === 'habisync-1_0') return true;
+  return Number(String(device.fw_version ?? '0').split('.')[0]) >= 1;
+}
+
+function tanksOf(profileConfig: any): any[] {
+  if (profileConfig?.tanks?.length) return profileConfig.tanks;
+  if (profileConfig?.temp_low_c == null || profileConfig?.temp_high_c == null) return [];
+  return [{ port: 0, name: 'Tank 1', ...profileConfig }];
+}
+
+function alertTargets(device: { fw_version: string; profile_config: any }, rows: TelemetrySampleRow[]): AlertTarget[] {
+  const bySampleTimeDesc = (a: TelemetrySampleRow, b: TelemetrySampleRow) =>
+    new Date(b.device_time ?? b.created_at).getTime() - new Date(a.device_time ?? a.created_at).getTime();
+  if (!isMonitorOnly(device)) {
+    return [{ port: null, tankName: null, config: device.profile_config, rows: [...rows].sort(bySampleTimeDesc) }];
+  }
+  const tanks = tanksOf(device.profile_config);
+  const byPort = new Map<number | null, TelemetrySampleRow[]>();
+  for (const row of rows) byPort.set(row.port ?? null, [...(byPort.get(row.port ?? null) ?? []), row]);
+  const targets: AlertTarget[] = [];
+  byPort.forEach((series, port) => {
+    // A port-less row on a 1.x unit is its first tank (1.0.0-1.2.0).
+    const tank = port == null ? tanks[0] : tanks.find((t) => t.port === port);
+    if (!tank) return; // a hidden tank: its probe reports, but it has no band
+    targets.push({ port, tankName: tank.name, config: tank, rows: series.sort(bySampleTimeDesc) });
+  });
+  return targets;
+}
+
 Deno.serve(async (req: Request) => {
   const cronSecret = Deno.env.get('CRON_SHARED_SECRET');
   if (!cronSecret || req.headers.get('X-Cron-Secret') !== cronSecret) {
@@ -196,7 +245,7 @@ Deno.serve(async (req: Request) => {
     .eq('status', 'open')
     .in('device_id', deviceIds);
   if (openAlertsError) throw openAlertsError;
-  const openAlertByKey = new Map((openAlerts ?? []).map((a) => [`${a.device_id}:${a.metric}`, a]));
+  const openAlertByKey = new Map((openAlerts ?? []).map((a) => [alertKey(a.device_id, a.metric, a.port ?? null), a]));
 
   // 3. Who's already been notified, per open alert — the ledger is the
   // source of truth for de-dup (not a per-alert-row flag), so a favoriter
@@ -274,6 +323,92 @@ Deno.serve(async (req: Request) => {
 
   const now = Date.now();
 
+  async function sweepRangeAlerts(
+    device: { device_id: string; name: string },
+    favoriters: { userId: string; email: string }[],
+    target: AlertTarget,
+  ) {
+    const deviceId = device.device_id;
+    const where = target.tankName ? `${device.name} — ${target.tankName}` : device.name;
+    for (const metric of METRICS) {
+      const range = metric.rangeOf(target.config);
+      if (!range) continue; // no target configured for this metric
+
+      const samples = target.rows.map((row) => ({
+        createdAtMs: new Date(row.device_time ?? row.created_at).getTime(),
+        value: metric.valueOf(row),
+      }));
+
+      const result = detectSustainedCondition(
+        samples,
+        // fleet-handoff-1.3.0 §4: a tank's band is [low, high). The devkit's
+        // range keeps its existing inclusive high.
+        target.port == null && !target.tankName ? outOfRange(range.low, range.high) : (v: number) => v < range.low || v >= range.high,
+        SUSTAINED_OUT_OF_RANGE_MS,
+        MAX_SAMPLE_GAP_MS,
+      );
+
+      const existing = openAlertByKey.get(alertKey(deviceId, metric.key, target.port));
+      const outOfRangeSubject = `${where}: ${metric.label} out of range`;
+
+      if (!existing) {
+        if (!result.isSustainedViolation) continue; // not out of range long enough yet
+
+        // New sustained episode — open it, then notify all current favoriters
+        // (none have a ledger row for this brand-new alert id).
+        const { data: inserted, error: insertError } = await supabase
+          .from('climate_alerts')
+          .insert({
+            device_id: deviceId,
+            metric: metric.key,
+            // Only sent when set, so devkit alerts keep inserting on a
+            // database that predates the column.
+            ...(target.port != null ? { port: target.port } : {}),
+            status: 'open',
+            out_of_range_since: new Date(result.violatingSinceMs!).toISOString(),
+            observed_value: result.latestValue,
+            low_threshold: range.low,
+            high_threshold: range.high,
+          })
+          .select('id')
+          .single();
+        // 23505 = a concurrent sweep already opened it; skip this pass and
+        // let the next one catch up via the existing-alert branch below.
+        if (insertError && insertError.code !== '23505') throw insertError;
+        if (!inserted) continue;
+
+        const body = emailBodyForOpen(
+          where, deviceId, metric.label, result.latestValue!, metric.unit,
+          range.low, range.high, result.violatingSinceMs!, appBaseUrl,
+        );
+        await notifyOpen(inserted.id, outOfRangeSubject, body, favoriters);
+        continue;
+      }
+
+      if (result.isViolatingNow) {
+        // Still out of range — catch up any favoriter without an 'opened'
+        // row (a new mid-alert favoriter, or an earlier failed send).
+        const body = emailBodyForOpen(
+          where, deviceId, metric.label, Number(existing.observed_value), metric.unit,
+          Number(existing.low_threshold), Number(existing.high_threshold),
+          new Date(existing.out_of_range_since).getTime(), appBaseUrl,
+        );
+        await notifyOpen(existing.id, outOfRangeSubject, body, favoriters);
+      } else {
+        // Back in range — resolve, then notify everyone who got the open.
+        const body = emailBodyForResolved(
+          where, deviceId, metric.label, result.latestValue!, metric.unit,
+          Number(existing.low_threshold), Number(existing.high_threshold), appBaseUrl,
+        );
+        await notifyResolve(existing.id, `${where}: ${metric.label} back in range`, body, favoriters);
+        await supabase
+          .from('climate_alerts')
+          .update({ status: 'resolved', resolved_at: new Date().toISOString() })
+          .eq('id', existing.id);
+      }
+    }
+  }
+
   async function sweepSensorFaults(
     device: { device_id: string; name: string; last_seen: string; uptime_ms: number; profile_config: any },
     favoriters: { userId: string; email: string }[],
@@ -319,7 +454,7 @@ Deno.serve(async (req: Request) => {
 
     for (const metric of SENSOR_METRICS) {
       const fault = standing.find((f) => f.channel === metric.channel);
-      const existing = openAlertByKey.get(`${deviceId}:${metric.key}`);
+      const existing = openAlertByKey.get(alertKey(deviceId, metric.key, null));
       const subject = `${device.name}: ${metric.label.toLowerCase()} not trusted — ${metric.outlet} off`;
 
       const range = metric.channel === 'temp'
@@ -391,10 +526,12 @@ Deno.serve(async (req: Request) => {
 
     const { data: telemetryRows, error: telemetryError } = await supabase
       .from('telemetry')
-      .select('created_at, temp_c, hum')
+      .select('created_at, device_time, port, temp_c, hum')
       .eq('device_id', deviceId)
       .order('created_at', { ascending: false })
-      .limit(60);
+      // An hour on a devkit unit; ~15 minutes per probe on a four-probe
+      // HabiSync 1.0 unit — still five times the 3-minute window.
+      .limit(240);
     if (telemetryError) throw telemetryError;
 
     // Isolated so the sensor path can never take the range alerts down with
@@ -408,77 +545,20 @@ Deno.serve(async (req: Request) => {
 
     if (!telemetryRows || telemetryRows.length === 0) continue;
 
-    for (const metric of METRICS) {
-      const range = metric.rangeOf(device.profile_config);
-      if (!range) continue; // no target configured for this metric
-
-      const samples = telemetryRows.map((row) => ({
-        createdAtMs: new Date(row.created_at).getTime(),
-        value: metric.valueOf(row),
-      }));
-
-      const result = detectSustainedCondition(
-        samples,
-        outOfRange(range.low, range.high),
-        SUSTAINED_OUT_OF_RANGE_MS,
-        MAX_SAMPLE_GAP_MS,
-      );
-
-      const key = `${deviceId}:${metric.key}`;
-      const existing = openAlertByKey.get(key);
-      const outOfRangeSubject = `${device.name}: ${metric.label} out of range`;
-
-      if (!existing) {
-        if (!result.isSustainedViolation) continue; // not out of range long enough yet
-
-        // New sustained episode — open it, then notify all current favoriters
-        // (none have a ledger row for this brand-new alert id).
-        const { data: inserted, error: insertError } = await supabase
-          .from('climate_alerts')
-          .insert({
-            device_id: deviceId,
-            metric: metric.key,
-            status: 'open',
-            out_of_range_since: new Date(result.violatingSinceMs!).toISOString(),
-            observed_value: result.latestValue,
-            low_threshold: range.low,
-            high_threshold: range.high,
-          })
-          .select('id')
-          .single();
-        // 23505 = a concurrent sweep already opened it; skip this pass and
-        // let the next one catch up via the existing-alert branch below.
-        if (insertError && insertError.code !== '23505') throw insertError;
-        if (!inserted) continue;
-
-        const body = emailBodyForOpen(
-          device.name, deviceId, metric.label, result.latestValue!, metric.unit,
-          range.low, range.high, result.violatingSinceMs!, appBaseUrl,
-        );
-        await notifyOpen(inserted.id, outOfRangeSubject, body, favoriters);
-        continue;
-      }
-
-      if (result.isViolatingNow) {
-        // Still out of range — catch up any favoriter without an 'opened'
-        // row (a new mid-alert favoriter, or an earlier failed send).
-        const body = emailBodyForOpen(
-          device.name, deviceId, metric.label, Number(existing.observed_value), metric.unit,
-          Number(existing.low_threshold), Number(existing.high_threshold),
-          new Date(existing.out_of_range_since).getTime(), appBaseUrl,
-        );
-        await notifyOpen(existing.id, outOfRangeSubject, body, favoriters);
-      } else {
-        // Back in range — resolve, then notify everyone who got the open.
-        const body = emailBodyForResolved(
-          device.name, deviceId, metric.label, result.latestValue!, metric.unit,
-          Number(existing.low_threshold), Number(existing.high_threshold), appBaseUrl,
-        );
-        await notifyResolve(existing.id, `${device.name}: ${metric.label} back in range`, body, favoriters);
-        await supabase
-          .from('climate_alerts')
-          .update({ status: 'resolved', resolved_at: new Date().toISOString() })
-          .eq('id', existing.id);
+    // One alert per series. A devkit unit, or a HabiSync 1.0 unit before
+    // 1.3.0, is one port-less series judged against the device's own range.
+    // A 1.3.0+ unit writes one row per probe per minute: each probe is its
+    // own series against its own tank's band, and a hidden tank's probe
+    // (no band) never alerts. Interleaving them would make every streak
+    // nonsense.
+    for (const target of alertTargets(device, telemetryRows)) {
+      try {
+        await sweepRangeAlerts(device, favoriters, target);
+      } catch (rangeError) {
+        // A port-carrying insert fails until add_climate_alert_port_2026-10-11.sql
+        // has run; never let one tank take the rest of the sweep down.
+        if (target.port == null) throw rangeError;
+        console.error(`range-alert sweep failed for ${deviceId} port ${target.port}:`, rangeError);
       }
     }
   }

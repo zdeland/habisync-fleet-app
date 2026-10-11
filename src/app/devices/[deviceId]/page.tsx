@@ -9,6 +9,8 @@ import type { ActiveSensorFault } from '@/lib/sensorFaults';
 import { getActiveOutletAlerts, getOutletAlertHistory, syncOutletAlerts, type OutletAlertHistoryEntry } from '@/lib/alerts';
 import type { OutletAlertRow } from '@/lib/types';
 import DeviceTimeline from '@/components/DeviceTimeline';
+import MonitorTimeline from '@/components/MonitorTimeline';
+import { isMonitorOnly } from '@/lib/probes';
 
 const PRESETS = {
   '1h': 60 * 60 * 1000,
@@ -112,16 +114,26 @@ export default async function DeviceTimelinePage({
         {/* Only auto-refresh a rolling preset window — a custom from/to range is a
             fixed historical query the user is studying, not a "keep watching" view. */}
         {activePreset && <AutoRefresh intervalMs={20_000} />}
-        <DeviceTimeline
-          data={data}
-          range={{ from, to }}
-          preset={activePreset}
-          retentionWarning={retentionWarning}
-          outletAlerts={outletAlerts}
-          sensorFaults={sensorFaults}
-          outletAlertHistory={outletAlertHistory}
-          isDeviceOffline={isDeviceOffline}
-        />
+        {isMonitorOnly(data.device) ? (
+          <MonitorTimeline
+            data={data}
+            range={{ from, to }}
+            preset={activePreset}
+            retentionWarning={retentionWarning}
+            isDeviceOffline={isDeviceOffline}
+          />
+        ) : (
+          <DeviceTimeline
+            data={data}
+            range={{ from, to }}
+            preset={activePreset}
+            retentionWarning={retentionWarning}
+            outletAlerts={outletAlerts}
+            sensorFaults={sensorFaults}
+            outletAlertHistory={outletAlertHistory}
+            isDeviceOffline={isDeviceOffline}
+          />
+        )}
       </div>
     </main>
   );

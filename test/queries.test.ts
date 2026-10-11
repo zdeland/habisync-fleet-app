@@ -17,7 +17,7 @@ function makeDevice(overrides: Partial<Device> = {}): Device {
   return {
     device_id: 'dev-1',
     name: 'Test Device',
-    fw_version: '1.0.0',
+    fw_version: '0.35.0',
     ip: '10.0.0.1',
     rssi: -50,
     free_heap: 100000,
@@ -54,6 +54,9 @@ function telemetryAt(isoTimes: string[], outletMask: number): TelemetryRow[] {
     outlet_mask: outletMask,
     free_heap: 100000,
     rssi: -50,
+    port: null,
+    probe_cap: null,
+    device_time: null,
   }));
 }
 
@@ -216,8 +219,8 @@ test('recreates the hs-2ac964 Day Light false positive and no longer flags it', 
   // actually ran) — both still mask=12 (0b001100: Fan + Day Light on),
   // i.e. taken *before* the Kasa plug physically responded at 23:00:58.
   const telemetryAtDetectionTime: TelemetryRow[] = [
-    { id: 101, device_id: 'hs-2ac964', created_at: '2026-07-20T22:59:58.843818Z', temp_c: 24, hum: 38, outlet_mask: 12, free_heap: 90000, rssi: -55 },
-    { id: 100, device_id: 'hs-2ac964', created_at: '2026-07-20T22:58:38.227457Z', temp_c: 24, hum: 38, outlet_mask: 12, free_heap: 90000, rssi: -55 },
+    { id: 101, device_id: 'hs-2ac964', created_at: '2026-07-20T22:59:58.843818Z', temp_c: 24, hum: 38, outlet_mask: 12, free_heap: 90000, rssi: -55, port: null, probe_cap: null, device_time: null },
+    { id: 100, device_id: 'hs-2ac964', created_at: '2026-07-20T22:58:38.227457Z', temp_c: 24, hum: 38, outlet_mask: 12, free_heap: 90000, rssi: -55, port: null, probe_cap: null, device_time: null },
   ];
 
   // The real logged transition: "Day Light [3] turned OFF — scheduled
@@ -246,8 +249,8 @@ test('still flags Day Light on hs-2ac964 if the mismatch had actually persisted'
   // Same mask=12 (Day Light still on) but sampled well after the logged
   // OFF's actuation grace period has elapsed — a genuinely stuck outlet.
   const telemetryMuchLater: TelemetryRow[] = [
-    { id: 201, device_id: 'hs-2ac964', created_at: '2026-07-20T23:15:00.000000Z', temp_c: 24, hum: 38, outlet_mask: 12, free_heap: 90000, rssi: -55 },
-    { id: 200, device_id: 'hs-2ac964', created_at: '2026-07-20T23:14:00.000000Z', temp_c: 24, hum: 38, outlet_mask: 12, free_heap: 90000, rssi: -55 },
+    { id: 201, device_id: 'hs-2ac964', created_at: '2026-07-20T23:15:00.000000Z', temp_c: 24, hum: 38, outlet_mask: 12, free_heap: 90000, rssi: -55, port: null, probe_cap: null, device_time: null },
+    { id: 200, device_id: 'hs-2ac964', created_at: '2026-07-20T23:14:00.000000Z', temp_c: 24, hum: 38, outlet_mask: 12, free_heap: 90000, rssi: -55, port: null, probe_cap: null, device_time: null },
   ];
 
   const lastLoggedByOutlet = new Map([

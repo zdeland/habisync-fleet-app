@@ -32,7 +32,7 @@ import type { Preset } from '@/app/devices/[deviceId]/page';
 // tailwind.config.ts by hand. Line colors match docs/style-guide.md §7
 // exactly: temp = accent teal, humidity = cool blue (a different pairing
 // than the gauge zone colors — don't conflate the two).
-const CHART_COLORS = {
+export const CHART_COLORS = {
   grid: '#1D3A57',
   axis: '#93A8BD',
   temp: '#4FD1C5',
@@ -51,7 +51,7 @@ const LEVEL_DOT_CLASSNAMES: Record<LogLevel, string> = {
   3: 'bg-device-text-tertiary', // debug
 };
 
-const PRESET_LABELS: Record<Preset, string> = {
+export const PRESET_LABELS: Record<Preset, string> = {
   '1h': 'Last hour',
   '24h': 'Last day',
   '7d': 'Last week',
@@ -85,7 +85,7 @@ function computeChartDomain(
   return [domainMin, domainMax];
 }
 
-function formatTime(ms: number) {
+export function formatTime(ms: number) {
   return new Date(ms).toLocaleString(undefined, {
     month: 'short',
     day: 'numeric',
@@ -97,7 +97,7 @@ function formatTime(ms: number) {
 // Prefer the device's own NTP-synced clock for display when present, per
 // docs/monitoring-webapp-plan.md §5 — created_at is what we sort/query by,
 // device_time is what a user would've seen on-device at the time.
-function displayTime(iso: string, deviceTime: string | null) {
+export function displayTime(iso: string, deviceTime: string | null) {
   return formatTime(new Date(deviceTime ?? iso).getTime());
 }
 
@@ -148,14 +148,25 @@ const TAG_ICONS: Partial<Record<LogTag, string>> = {
   sensor: '🌡️',
   cloudlog: '☁️',
   config: '⚙️',
+  probe: '🔌',
+  'factory-reset': '🧹',
+  probetest: '🧪',
+  reference: '🧪',
 };
+
+// The probe cap test's own rows (fleet-handoff-1.3.0 §6): a person
+// running a bench test, not device health — labelled TEST like the
+// dashboard test buttons' rows.
+function isTestRow(row: LogRow): boolean {
+  return isTestReason(row.message) || row.tag === 'probetest' || row.tag === 'reference';
+}
 
 // tag='event' rows carry outlet_index for outlet transitions (use the
 // role's own icon, resolved against whatever config was active at that
 // row's own timestamp) but day/night and automation toggles don't
 // correspond to one outlet, so fall back to a simple keyword match.
 function iconForLog(row: LogRow, device: Device, configLogs: LogRow[]) {
-  if (isTestReason(row.message)) return '🧪';
+  if (isTestRow(row)) return '🧪';
   if (row.tag === 'event') {
     if (row.outlet_index != null) {
       const { outletRoles } = resolveConfigAt(configLogs, device, row.created_at);
@@ -1115,7 +1126,7 @@ function AttentionAlertItem({
 // once it's stopped reporting (STALE_AFTER_MS, same threshold as the fleet
 // table's "stale" status) that state is unknown, not just old, so showing a
 // last-known reading/outlet layout would misrepresent it as live.
-function OfflineNotice({ lastSeen }: { lastSeen: string }) {
+export function OfflineNotice({ lastSeen }: { lastSeen: string }) {
   return (
     <section className="rounded-2xl bg-device-screen p-4 shadow-device sm:p-6">
       <div className="flex items-center gap-3 rounded-xl bg-device-surface px-4 py-4 text-device-text-secondary">
@@ -1236,7 +1247,7 @@ function ContextPanel({ state }: { state: ReconstructedState }) {
 // Merges real logs with the synthetic offline/health-change markers from
 // src/lib/health.ts — both render the same row shape, just with a
 // different icon/message source (see TimelineEntry's discriminated kind).
-function EventLog({ data, entries }: { data: DeviceTimelineData; entries: TimelineEntry[] }) {
+export function EventLog({ data, entries }: { data: DeviceTimelineData; entries: TimelineEntry[] }) {
   const newestFirst = useMemo(() => [...entries].reverse(), [entries]);
 
   return (
@@ -1266,7 +1277,7 @@ function EventLog({ data, entries }: { data: DeviceTimelineData; entries: Timeli
               }
 
               const row = entry.row;
-              const isTest = isTestReason(row.message);
+              const isTest = isTestRow(row);
               return (
                 <div key={entry.id} className="flex items-start gap-3 rounded-lg bg-device-surface px-3 py-2.5">
                   <div className="w-[22px] flex-shrink-0 text-center text-[1.3em] sm:w-[26px]">
@@ -1280,7 +1291,11 @@ function EventLog({ data, entries }: { data: DeviceTimelineData; entries: Timeli
                       <span>{row.message}</span>
                       {isTest && (
                         <span
-                          title="Triggered by hand from the device's dashboard — a real outlet change, but not an automation decision"
+                          title={
+                            isTestReason(row.message)
+                              ? "Triggered by hand from the device's dashboard — a real outlet change, but not an automation decision"
+                              : 'Probe cap test — a bench test a person is running, not device health'
+                          }
                           className={`rounded px-1.5 py-0.5 text-[0.7em] font-mono font-semibold ${GAUGE_COLORS.neutral.badgeClassName}`}
                         >
                           TEST
@@ -1290,7 +1305,7 @@ function EventLog({ data, entries }: { data: DeviceTimelineData; entries: Timeli
                     {row.temp_c != null && row.hum != null && (
                       <div className="mt-0.5 text-[0.75em] text-device-text-tertiary">
                         {celsiusToFahrenheit(row.temp_c).toFixed(1)}°F / {row.hum.toFixed(1)}% RH
-                        {isTest && ' (real reading — not what drove this test)'}
+                        {isTestReason(row.message) && ' (real reading — not what drove this test)'}
                       </div>
                     )}
                   </div>

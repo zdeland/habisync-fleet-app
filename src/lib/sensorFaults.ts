@@ -148,7 +148,7 @@ function findStreaks(
   return found;
 }
 
-const bit = (row: TelemetryRow, index: number) => Boolean(row.outlet_mask & (1 << index));
+const bit = (row: TelemetryRow, index: number) => Boolean((row.outlet_mask ?? 0) & (1 << index));
 
 export function detectSensorAnomalies(
   rows: TelemetryRow[],

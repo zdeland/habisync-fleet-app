@@ -10,6 +10,8 @@ import { compareFwVersions } from '@/lib/version';
 import { toggleFavoriteDevice } from '@/app/actions/favorites';
 import type { TelemetryRow, ProfileConfig, OutletAlertRow } from '@/lib/types';
 import type { ActiveSensorFault } from '@/lib/sensorFaults';
+import { classifyBand, isMonitorOnly, seriesLabel, type BandPosition } from '@/lib/probes';
+import type { ProbeReading } from '@/lib/queries';
 
 // Mirrors the on-device "status check" component (dot + mono one-liner),
 // repurposed here for fleet-level health per docs/style-guide.md §8.
@@ -125,6 +127,53 @@ function RangeCell({ value, unit, badge }: { value: number | null; unit: string;
     <td className="px-4 py-3">
       <RangeValue value={value} unit={unit} badge={badge} />
     </td>
+  );
+}
+
+// A HabiSync 1.0 unit has up to four tanks, each with its own band, and no
+// automation — so one line per probe instead of one value and a badge, the
+// value colored against that tank's band. A hidden tank's probe still
+// reports; it has no band and reads neutral.
+const BAND_TEXT: Record<BandPosition, { temp: string; hum: string }> = {
+  low: { temp: GAUGE_COLORS.cool.textClassName, hum: GAUGE_COLORS.dry.textClassName },
+  in: { temp: GAUGE_COLORS.good.textClassName, hum: GAUGE_COLORS.good.textClassName },
+  high: { temp: GAUGE_COLORS.alert.textClassName, hum: GAUGE_COLORS.alert.textClassName },
+};
+
+function ProbeList({
+  probes,
+  profileConfig,
+  metric,
+  valueClassName = '',
+}: {
+  probes: ProbeReading[];
+  profileConfig: ProfileConfig;
+  metric: 'temp' | 'hum';
+  valueClassName?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      {probes.map(({ port, row, tank }) => {
+        const value = metric === 'temp' ? celsiusToFahrenheit(row.temp_c) : row.hum;
+        let textClassName: string = GAUGE_COLORS.neutral.textClassName;
+        if (tank) {
+          const position =
+            metric === 'temp'
+              ? classifyBand(row.temp_c, tank.temp_low_c, tank.temp_high_c)
+              : classifyBand(row.hum, tank.hum_low, tank.hum_high);
+          textClassName = BAND_TEXT[position][metric];
+        }
+        return (
+          <div key={port ?? 'x'} className="flex items-baseline justify-between gap-2">
+            <span className="truncate text-[0.75em] text-device-text-tertiary">{seriesLabel(profileConfig, port)}</span>
+            <span className={`font-mono ${valueClassName} ${textClassName}`}>
+              {value.toFixed(1)}
+              {metric === 'temp' ? '°F' : '%'}
+            </span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -257,7 +306,10 @@ type DeviceRow = {
   lastSeenLabel: string;
 };
 
-function deriveRow(entry: DeviceHealth, latestFwVersion: string | null): DeviceRow {
+type LatestFwVersions = { devkit: string | null; monitor: string | null };
+
+function deriveRow(entry: DeviceHealth, latestFwVersions: LatestFwVersions): DeviceRow {
+  const latestFwVersion = latestFwVersions[isMonitorOnly(entry.device) ? 'monitor' : 'devkit'];
   return {
     entry,
     href: `/devices/${entry.device.device_id}`,
@@ -311,11 +363,19 @@ function DeviceCard({ row, isFavorite }: { row: DeviceRow; isFavorite: boolean }
       <div className="mt-3 grid grid-cols-2 gap-2">
         <div className="rounded-lg bg-white/5 p-3">
           <p className="text-[0.7em] font-medium uppercase tracking-wider text-device-text-tertiary">Temp</p>
-          <RangeValue value={tempF} unit="°F" badge={tempBadge} valueClassName="mt-0.5 text-xl" />
+          {entry.probes.length > 0 ? (
+            <ProbeList probes={entry.probes} profileConfig={entry.device.profile_config} metric="temp" valueClassName="text-base" />
+          ) : (
+            <RangeValue value={tempF} unit="°F" badge={tempBadge} valueClassName="mt-0.5 text-xl" />
+          )}
         </div>
         <div className="rounded-lg bg-white/5 p-3">
           <p className="text-[0.7em] font-medium uppercase tracking-wider text-device-text-tertiary">Humidity</p>
-          <RangeValue value={hum} unit="%" badge={humBadge} valueClassName="mt-0.5 text-xl" />
+          {entry.probes.length > 0 ? (
+            <ProbeList probes={entry.probes} profileConfig={entry.device.profile_config} metric="hum" valueClassName="text-base" />
+          ) : (
+            <RangeValue value={hum} unit="%" badge={humBadge} valueClassName="mt-0.5 text-xl" />
+          )}
         </div>
       </div>
 
@@ -337,7 +397,7 @@ function DeviceCard({ row, isFavorite }: { row: DeviceRow; isFavorite: boolean }
           {isOutdated && ' · OUTDATED'}
         </span>
         <span aria-hidden="true">·</span>
-        <span>{entry.device.active_backend}</span>
+        <span>{entry.device.active_backend ?? 'HabiSync 1.0'}</span>
       </div>
     </div>
   );
@@ -386,8 +446,21 @@ function DeviceTable({ rows, favoriteDeviceIds }: { rows: DeviceRow[]; favoriteD
               </Link>
               <div className="text-xs text-device-text-tertiary">{entry.device.device_id}</div>
             </td>
-            <RangeCell value={tempF} unit="°F" badge={tempBadge} />
-            <RangeCell value={hum} unit="%" badge={humBadge} />
+            {entry.probes.length > 0 ? (
+              <>
+                <td className="px-4 py-3">
+                  <ProbeList probes={entry.probes} profileConfig={entry.device.profile_config} metric="temp" />
+                </td>
+                <td className="px-4 py-3">
+                  <ProbeList probes={entry.probes} profileConfig={entry.device.profile_config} metric="hum" />
+                </td>
+              </>
+            ) : (
+              <>
+                <RangeCell value={tempF} unit="°F" badge={tempBadge} />
+                <RangeCell value={hum} unit="%" badge={humBadge} />
+              </>
+            )}
             <td className="px-4 py-3">
               <div className="flex items-center gap-2 font-mono text-xs">
                 <span className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${status.dot}`} />
@@ -409,7 +482,7 @@ function DeviceTable({ rows, favoriteDeviceIds }: { rows: DeviceRow[]; favoriteD
                 </div>
               )}
             </td>
-            <td className="px-4 py-3 text-device-text-secondary">{entry.device.active_backend}</td>
+            <td className="px-4 py-3 text-device-text-secondary">{entry.device.active_backend ?? 'HabiSync 1.0'}</td>
           </tr>
         ))}
       </tbody>
@@ -426,7 +499,7 @@ function DeviceRows({
   favoriteDeviceIds,
 }: {
   fleet: DeviceHealth[];
-  latestFwVersion: string | null;
+  latestFwVersion: LatestFwVersions;
   favoriteDeviceIds: Set<string>;
 }) {
   const rows = fleet.map((entry) => deriveRow(entry, latestFwVersion));
@@ -462,11 +535,18 @@ export default function FleetTable({
   // "Latest" here means the newest version reported anywhere in this fleet
   // right now — there's no external firmware release feed this read-only
   // app can check against, only what devices have actually reported.
-  const latestFwVersion = fleet.reduce<string | null>(
-    (latest, entry) =>
-      latest == null || compareFwVersions(entry.device.fw_version, latest) > 0 ? entry.device.fw_version : latest,
-    null,
-  );
+  //
+  // Per line: HabiSync 1.0 (1.x) and the devkit (0.35.x) are separate
+  // firmware lines that both carry on, so a devkit unit on the newest 0.x is
+  // current however far 1.x has moved (fleet-handoff-1.3.0 §2).
+  const latestFwVersion: LatestFwVersions = { devkit: null, monitor: null };
+  for (const entry of fleet) {
+    const line = isMonitorOnly(entry.device) ? 'monitor' : 'devkit';
+    const latest = latestFwVersion[line];
+    if (latest == null || compareFwVersions(entry.device.fw_version, latest) > 0) {
+      latestFwVersion[line] = entry.device.fw_version;
+    }
+  }
 
   // "Offline" here reuses the same staleness signal as the Status column
   // (no heartbeat in the last 10 min, see STALE_AFTER_MS in lib/queries.ts)

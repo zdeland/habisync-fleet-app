@@ -18,7 +18,15 @@ export type LogTag =
   | 'sensor'
   | 'event'
   | 'cloudlog'
-  | 'config';
+  | 'config'
+  // HabiSync 1.0 (firmware 1.x) — fleet-handoff-1.3.0 §5. `probe` is a
+  // port's state change (port 0-based in the message); `probetest` and
+  // `reference` are the probe cap test's own rows (§6), test traffic rather
+  // than device health.
+  | 'probe'
+  | 'factory-reset'
+  | 'probetest'
+  | 'reference';
 
 // One scheduled on/off window for a light, as it appears inside
 // profile_config's `*_ranges` arrays (firmware 0.26.0+). Times are "HH:MM"
@@ -132,8 +140,24 @@ export type FanWindow = {
 // these fields directly. Both the arrays and basking_on/basking_off are
 // optional because pre-0.26.0 devices (and every historized tag='config'
 // row written before their upgrade) don't have them at all.
+// One tank on a HabiSync 1.0 unit (firmware 1.1.0+): the probe on `port`
+// (0-3, shown to people as 1-4) and that tank's own target band. Ranges are
+// [low, high): below low is low, at or above high is high. Only shown
+// (active) tanks are listed — a hidden tank's probe still reports, with no
+// entry here. Read via src/lib/probes.ts, never directly.
+export type TankConfig = {
+  port: number;
+  name: string;
+  profile: string;
+  temp_low_c: number;
+  temp_high_c: number;
+  hum_low: number;
+  hum_high: number;
+};
+
 export type ProfileConfig = {
   profile: string;
+  // Absent on HabiSync 1.0: a monitor-only unit has no automation to enable.
   enabled: boolean;
   temp_low_c?: number;
   temp_high_c?: number;
@@ -170,6 +194,11 @@ export type ProfileConfig = {
   timezone: string;
   ota_url: string;
   kasa_ip?: string;
+  // HabiSync 1.0 only (fleet-handoff-1.3.0 §4). The top-level profile and
+  // temp_*/hum_* fields repeat the first tank's, for tooling that predates
+  // tanks — prefer `tanks`. `board` is 'habisync-1_0' on that line.
+  tanks?: TankConfig[];
+  board?: string;
 };
 
 export type Device = {
@@ -180,9 +209,11 @@ export type Device = {
   rssi: number;
   free_heap: number;
   uptime_ms: number;
-  active_backend: string;
+  // Both null on HabiSync 1.0, which has no outlets — see src/lib/probes.ts's
+  // isMonitorOnly() before reading either.
+  active_backend: string | null;
   reset_reason: string;
-  outlet_roles: string[];
+  outlet_roles: string[] | null;
   profile_config: ProfileConfig;
   first_seen: string;
   last_seen: string;
@@ -211,9 +242,19 @@ export type TelemetryRow = {
   created_at: string;
   temp_c: number; // renamed from temp_f in firmware 0.5.0 — native Celsius
   hum: number;
-  outlet_mask: number;
+  outlet_mask: number | null; // null on HabiSync 1.0, which has no outlets
   free_heap: number;
   rssi: number;
+  // Firmware 1.3.0+ (fleet-handoff-1.3.0 §3): one row per probe per minute.
+  // `port` is the probe port 0-3, null on devkit and pre-1.3.0 rows — which
+  // are then the device's one reading. A series is (device_id, port); never
+  // treat a device's rows as one series. Read via src/lib/probes.ts.
+  port: number | null;
+  probe_cap: 'unset' | 'capped' | 'uncapped' | null;
+  // When the unit took the sample; null until its clock is set. Rows upload
+  // in batches, so a Wi-Fi outage lands a backlog under one created_at —
+  // order and plot by sampleTime() (device_time ?? created_at).
+  device_time: string | null;
 };
 
 export type OutletAlertStatus = 'open' | 'escalated' | 'auto_resolved' | 'closed';
@@ -281,6 +322,7 @@ export type ClimateAlertRow = {
   id: number;
   device_id: string;
   metric: ClimateAlertMetric;
+  port: number | null; // HabiSync 1.0 tank's probe port; null for devkit / pre-1.3.0
   status: ClimateAlertStatus;
   out_of_range_since: string;
   observed_value: number;

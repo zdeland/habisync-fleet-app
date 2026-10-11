@@ -41,10 +41,11 @@ export async function getDeviceTimelineData(
   if (!device) return null;
 
   // Bounded rather than unbounded per docs/monitoring-webapp-plan.md's
-  // pagination note — enough rows for a week at the ~60s telemetry cadence.
-  // Wide ranges should eventually downsample instead of raising this limit
-  // further; deferred for this first pass.
-  const ROW_LIMIT = 20_000;
+  // pagination note — enough rows for a week at the ~60s telemetry cadence
+  // on a four-probe HabiSync 1.0 unit (one row per probe per minute, about
+  // 40k a week). The 1.x charts average long ranges into buckets
+  // (MonitorTimeline.tsx); the devkit replay needs every row.
+  const ROW_LIMIT = 45_000;
 
   // Ordering these DESCENDING (not ascending) is deliberate, not cosmetic:
   // a Supabase project's configured max-rows setting silently caps a
@@ -57,6 +58,11 @@ export async function getDeviceTimelineData(
   // Fetch newest-first so a silent cap keeps the recent end instead, then
   // reverse back to ascending below since the rest of this module and the
   // reducer assume chronological order.
+  // The cap is real and is 1,000 rows on this project (measured
+  // 2026-10-11) — so a 24h devkit range (~1,440 rows) was quietly showing
+  // only its newest ~16 hours, and a 3-probe 1.x unit would show ~5.5.
+  // Telemetry is the one query here that routinely exceeds it, so it pages:
+  // see fetchTelemetryPages.
   const [
     { data: telemetryInRange, error: telemetryError },
     { data: seedTelemetry, error: seedTelemetryError },
@@ -64,14 +70,7 @@ export async function getDeviceTimelineData(
     { data: seedConfig, error: seedConfigError },
     { data: seedSensor, error: seedSensorError },
   ] = await Promise.all([
-    supabase
-      .from('telemetry')
-      .select('*')
-      .eq('device_id', deviceId)
-      .gte('created_at', range.from)
-      .lte('created_at', range.to)
-      .order('created_at', { ascending: false })
-      .limit(ROW_LIMIT),
+    fetchTelemetryPages(supabase, deviceId, range, ROW_LIMIT),
     supabase
       .from('telemetry')
       .select('*')
@@ -124,6 +123,43 @@ export async function getDeviceTimelineData(
   return { device, telemetry, events, allLogs, configLogs, sensorFaults };
 }
 
+// PostgREST's max-rows cap on this project. Pages are requested at exactly
+// this size; a smaller one would just mean more round trips.
+const PAGE_SIZE = 1000;
+
+// Every telemetry row in range, newest-first, up to `rowLimit`. The first
+// page also asks for an exact count, so the rest can be fetched in parallel
+// rather than one round trip after another.
+async function fetchTelemetryPages(
+  supabase: SupabaseClient<Database>,
+  deviceId: string,
+  range: TimeRange,
+  rowLimit: number,
+): Promise<{ data: TelemetryRow[] | null; error: Error | null }> {
+  const page = (from: number, count?: 'exact') =>
+    supabase
+      .from('telemetry')
+      .select('*', count ? { count } : undefined)
+      .eq('device_id', deviceId)
+      .gte('created_at', range.from)
+      .lte('created_at', range.to)
+      // id breaks created_at ties: a batch upload stamps every row in it
+      // with the same created_at, and paging needs a total order.
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(from, from + PAGE_SIZE - 1);
+
+  const first = await page(0, 'exact');
+  if (first.error) return { data: null, error: first.error };
+  const total = Math.min(first.count ?? first.data.length, rowLimit);
+  const offsets: number[] = [];
+  for (let from = PAGE_SIZE; from < total; from += PAGE_SIZE) offsets.push(from);
+  const rest = await Promise.all(offsets.map((from) => page(from)));
+  const failed = rest.find((r) => r.error);
+  if (failed?.error) return { data: null, error: failed.error };
+  return { data: [...first.data, ...rest.flatMap((r) => r.data ?? [])].slice(0, rowLimit), error: null };
+}
+
 export type ResolvedConfig = {
   outletRoles: string[];
   profileConfig: ProfileConfig | null;
@@ -143,7 +179,7 @@ export function resolveConfigAt(configLogs: LogRow[], device: Device, t: string)
     return { outletRoles: active.outlet_roles, profileConfig: active.profile_config, isFallback: false };
   }
 
-  return { outletRoles: device.outlet_roles, profileConfig: device.profile_config, isFallback: true };
+  return { outletRoles: device.outlet_roles ?? [], profileConfig: device.profile_config, isFallback: true };
 }
 
 export type OutletState = {

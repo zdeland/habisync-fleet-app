@@ -179,6 +179,31 @@ no structured field for the latch. If the firmware rewords those rows the
 parser stops matching and these alerts silently stop — re-check
 `parseSensorEdge()` against every firmware handoff.
 
+## HabiSync 1.0 tanks (firmware 1.3.0+)
+
+A HabiSync 1.0 unit has up to four tanks, each with its own band, and from
+1.3.0 writes one telemetry row per probe per minute (docs/automation-rules.md
+§12). Judging those rows as one series against the device's top-level
+range — which is only the first tank's — interleaves the probes and makes
+every streak meaningless. So the sweep splits each 1.x unit's rows by
+`port` and runs the same detection per tank, against that tank's band,
+treated as `[low, high)`. A hidden tank (a reporting probe with no entry in
+`tanks[]`) has no band and never alerts. A 1.x unit before 1.3.0 has one
+port-less series, its first tank.
+
+That makes an alert per `(device_id, metric, port)`:
+`add_climate_alert_port_2026-10-11.sql` adds `climate_alerts.port` (null
+for devkit units and pre-1.3.0 rows) and rebuilds the "one open alert"
+index over `coalesce(port, -1)`. Subjects and bodies name the tank:
+`<device> — <tank>: Temperature out of range`. Samples are ordered by
+`coalesce(device_time, created_at)`, since a backlog after an outage lands
+under one `created_at`. The telemetry read went from 60 to 240 rows so a
+four-probe unit still has ~15 minutes per probe.
+
+The pure helpers this needs (`isMonitorOnly`, `tanksOf`, the per-port
+split) are duplicated from `src/lib/probes.ts` in the function, by the same
+hand-sync convention as `tempRangeC`.
+
 ## Extensibility — adding a new alert type later
 
 **A new range-based metric** (e.g. RSSI signal strength or free heap memory

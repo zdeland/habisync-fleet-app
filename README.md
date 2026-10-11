@@ -53,7 +53,8 @@ runbook.
    `supabase/grant_service_role_logs.sql` in the Supabase SQL editor.
    (An existing install that predates sensor-fault alerts also needs
    `supabase/add_sensor_fault_alert_metrics_2026-10-11.sql` — run it, and
-   the logs grant, before redeploying the function.)
+   the logs grant, before redeploying the function — and one that predates
+   per-tank alerts needs `supabase/add_climate_alert_port_2026-10-11.sql`.)
 2. `supabase login`, then `supabase link --project-ref <ref>`.
 3. `supabase functions deploy climate-alerts`.
 4. Set secrets (values below) with `supabase secrets set KEY=value ...`.
@@ -84,7 +85,9 @@ curl -X POST https://<ref>.supabase.co/functions/v1/climate-alerts \
   -H "X-Cron-Secret: <value>" -H "Content-Type: application/json" -d '{}'
 ```
 
-Check `supabase functions logs climate-alerts` if no email arrives.
+If no email arrives, check the function's logs in the Supabase dashboard
+(Edge Functions → climate-alerts → Logs) — the CLI has no `functions logs`
+command.
 
 For a sensor-fault alert, insert a `logs` row instead — `tag='sensor'`,
 `level=0`, `message` = `Humidity sensor not trusted (no rise while misting)

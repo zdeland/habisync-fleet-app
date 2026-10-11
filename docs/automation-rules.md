@@ -43,6 +43,7 @@ nothing, check this list and then check the section it names.**
 | 0.33.0 | yes | Scheduled fan windows (§5b) |
 | 0.34.0 | no handoff — dashboard-only release | Nothing on the wire; 0.35.0's handoff confirms 0.33.0 and earlier still hold |
 | 0.35.0 | yes — a month late, uncommitted work discarded and redone 2026-10-11 | Sensor trust gates (§3a, §4b), sensor anomaly rules (§11) |
+| 1.0.0-1.3.0 | yes, 2026-10-11 — first handoff for the HabiSync 1.0 line | Per-probe telemetry, tanks, the line split (§12). Probe cap test view not built |
 
 Rows before 0.29.0 are reconstructed from what is demonstrably in this
 document, not from a received-and-filed copy — the ledger starts here, so
@@ -1165,3 +1166,94 @@ second warning about depending on that text:
 None of this is built. It is recorded because the earlier guidance said a
 spike-verification rule was not buildable at all, which was true of
 `outlet_mask` and wrong as a general claim.
+
+## 12. HabiSync 1.0 (firmware 1.x) — a second line, monitor-only
+
+From the 1.0.0-1.3.0 handoff (`fleet-handoff-1.3.0.md` in the firmware
+repo). Everything in §1-11 is the **devkit** line, which carries on at
+0.35.x unchanged. A HabiSync 1.0 unit (board `habisync-1_0`) **monitors
+only**: one to four tanks, one RS-485 temperature/humidity probe per tank on
+ports 0-3 (people see 1-4), and no outlets, relays, Kasa, automation or
+schedules. **None of §2-11 applies to it** — no heater/mister/fan
+thresholds, no sensor-fault latches, no outlet replay.
+
+**Telling the lines apart:** `devices.profile_config->>'board' =
+'habisync-1_0'`, or `fw_version` major ≥ 1. Use either — `isMonitorOnly()`
+in `src/lib/probes.ts`. `fw_version` can lag: on 2026-10-11 `hs-f0a74c`
+reported `1.2.0` while already writing per-port rows, so anything that
+depends on the telemetry *shape* should key on `port` being present, not
+on the version. On a 1.x unit these are null or absent:
+`telemetry.outlet_mask`, `devices.outlet_roles`, `devices.active_backend`,
+`logs.outlet_index`/`outlet_state`/`outlet_roles`, and
+`profile_config.enabled`.
+
+### 12a. Telemetry: one row per probe per minute (1.3.0+)
+
+| Firmware | Rows | `port` |
+|---|---|---|
+| 0.35.x devkit | one per device per minute | null |
+| 1.0.0-1.2.0 | one per device per minute — **the first tank's reading only** | null |
+| 1.3.0+ | one per probe with a current reading, per minute | 0-3 |
+
+New nullable columns: `port`, `probe_cap` (`unset`/`capped`/`uncapped`,
+null with `port`) and `device_time` (when the unit sampled; null until its
+clock is set). A three-probe unit writes three rows a minute, all with the
+same `device_time`; `free_heap`/`rssi` repeat on each, so count them once
+per `device_time`.
+
+- **A series is `(device_id, port)`; `port IS NULL` is one series.** Never
+  treat a device's rows as one series — probes interleave on every chart,
+  and "the latest sample" becomes whichever probe sorted last.
+  `splitByPort()`/`latestPerSeries()`.
+- **Order and plot by `coalesce(device_time, created_at)`** (`sampleTime()`).
+  Rows upload in 30s batches, and after an outage a whole backlog lands with
+  one `created_at`.
+- **A missing row means no reading that minute** (unplugged or not
+  answering); the `probe` log rows say which.
+- **Volume:** up to ~5,800 rows a day per unit. PostgREST on this project
+  caps every response at **1,000 rows** (measured 2026-10-11), so the
+  device page pages through them (`fetchTelemetryPages`, `timeline.ts`) —
+  which also fixed a devkit 24h view that had been silently showing only
+  its newest ~16 hours. Long ranges are averaged into buckets on the 1.x
+  charts.
+
+### 12b. Tanks and their bands
+
+`profile_config.tanks[]` lists the **shown** tanks, each `{port, name,
+profile, temp_low_c, temp_high_c, hum_low, hum_high}`. Bands are
+**`[low, high)`**: at or above `high` is high (`classifyBand()`) — unlike the
+devkit's ranges, whose high is inclusive because it's an automation
+trigger. The top-level `profile`/`temp_*`/`hum_*` repeat the first tank's
+values for older tooling; prefer `tanks[]`. A hidden tank's probe still
+reports but has no entry, so it has no band and never alerts. A port-less
+row on a 1.x unit belongs to the first tank. `tag='config'` rows historize
+the same object on each settings save.
+
+### 12c. Logs
+
+No `port` column; where a row is about one probe, the port is in the
+message. New tags: `probe` (a port's state change, `Port <p> <from> -> <to>
+...`, port 0-based, states `empty`/`ok`/`stale`/`offline`),
+`factory-reset`, and the probe cap test's `probetest` and `reference` rows,
+which the event log labels TEST. `event` rows carry Device History entries
+with that tank's `temp_c`/`hum`; from 1.3.0 that includes cap changes,
+`Probe on port <n> (<tank>) marked capped` — **port 1-based there**. Alert
+rows (`tag='alert'`) are planned firmware-side but don't exist yet.
+
+### 12d. In this repo
+
+- Fleet table: one line per tank, colored against that tank's band; no
+  backend column; OUTDATED judged within each line (a devkit unit on the
+  newest 0.x isn't outdated because 1.x exists).
+- Device page: `MonitorTimeline.tsx` instead of `DeviceTimeline.tsx` — tank
+  cards with `probe_cap`, one temperature and one humidity chart with a line
+  per probe, and the shared event log.
+- Outlet-mismatch alerts, the climate replay and the outlet rules of §11
+  never run on a 1.x unit. §11's two channel rules (RH pinned at 0.0, a
+  stuck temperature) do, per probe.
+- Climate alert emails are per tank (`climate_alerts.port`,
+  `add_climate_alert_port_2026-10-11.sql`).
+- **Not built:** the probe cap test view (handoff §6). Its maths are in the
+  firmware repo's `probe-cap-test.md` and `scripts/probe_test_report.py`,
+  whose output is the reference for checking one.
+

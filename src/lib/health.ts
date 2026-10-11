@@ -2,6 +2,7 @@ import type { LogLevel, LogRow, TelemetryRow } from '@/lib/types';
 import { CRITICAL_ERROR_COUNT, ERROR_WINDOW_MS, STALE_AFTER_MS, WARNING_ERROR_COUNT } from '@/lib/queries';
 import { resolveConfigAt, type DeviceTimelineData, type TimeRange } from '@/lib/timeline';
 import { detectSensorAnomalies, type SensorAnomalyKind, type SensorFaultEpisode } from '@/lib/sensorFaults';
+import { portLabel, splitByPort } from '@/lib/probes';
 
 // Computed purely from data already fetched for the viewed range — not
 // persisted anywhere. Nothing writes these into the device's own `logs`
@@ -168,13 +169,22 @@ const ANOMALY_MESSAGE: Record<SensorAnomalyKind, (runaway: boolean) => string> =
 function deriveSensorAnomalyEvents(data: DeviceTimelineData): HealthEvent[] {
   const indexAt = (row: TelemetryRow, role: 'Heater' | 'Mister') =>
     resolveConfigAt(data.configLogs, data.device, row.created_at).outletRoles.indexOf(role);
-  return detectSensorAnomalies(data.telemetry, data.device.fw_version, indexAt).map((a) => ({
-    id: `sensor-${a.kind}-${a.since}`,
-    createdAt: a.at,
-    level: a.kind === 'temp-stuck' ? 1 : 0,
-    icon: a.runaway ? '🚨' : '🌡️',
-    message: ANOMALY_MESSAGE[a.kind](a.runaway),
-  }));
+  // Per probe: on a 1.3.0+ unit the rows interleave up to four series, and a
+  // streak only means anything within one. A HabiSync 1.0 unit has no
+  // outlets, so only the two channel rules can fire there.
+  const events: HealthEvent[] = [];
+  splitByPort(data.telemetry).forEach((series, port) => {
+    for (const a of detectSensorAnomalies(series, data.device.fw_version, indexAt)) {
+      events.push({
+        id: `sensor-${a.kind}-${port ?? 'x'}-${a.since}`,
+        createdAt: a.at,
+        level: a.kind === 'temp-stuck' ? 1 : 0,
+        icon: a.runaway ? '🚨' : '🌡️',
+        message: (port == null ? '' : `${portLabel(port)}: `) + ANOMALY_MESSAGE[a.kind](a.runaway),
+      });
+    }
+  });
+  return events;
 }
 
 // Offline/reconnect and health-severity-change markers for the device

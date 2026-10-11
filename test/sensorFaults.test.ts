@@ -61,7 +61,7 @@ function device(overrides: Partial<Device> = {}): Device {
 }
 
 function sample(minutes: number, temp_c: number, hum: number, outlet_mask = 0): TelemetryRow {
-  return { id: minutes, device_id: 'dev-1', created_at: at(minutes), temp_c, hum, outlet_mask, free_heap: 0, rssi: -50 };
+  return { id: minutes, device_id: 'dev-1', created_at: at(minutes), temp_c, hum, outlet_mask, free_heap: 0, rssi: -50, port: null, probe_cap: null, device_time: null };
 }
 
 test('parses both edges on both channels, and ignores other sensor rows', () => {

@@ -2,6 +2,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Database, Device, LogRow, OutletAlertRow, TelemetryRow } from '@/lib/types';
 import { getActiveOutletAlerts, syncOutletAlerts, type AlertSnapshot } from '@/lib/alerts';
 import { activeSensorFaults, type ActiveSensorFault } from '@/lib/sensorFaults';
+import { isMonitorOnly, latestPerSeries, tankForSeries } from '@/lib/probes';
+import type { TankConfig } from '@/lib/types';
 
 // devices.last_seen is upserted on a 5-min heartbeat (docs/monitoring-webapp-plan.md §4.1).
 // Exported so src/lib/health.ts's per-timeline offline/severity detection
@@ -62,7 +64,17 @@ export interface DeviceHealth {
   // goes away when the device logs a recovery, reboots, or has automation
   // switched off and on.
   activeSensorFaults: ActiveSensorFault[];
+  // HabiSync 1.0 units only (empty for devkit): the latest reading per
+  // probe, each with the tank it belongs to — null for a hidden tank's
+  // probe. A pre-1.3.0 unit has one port-less entry, its first tank.
+  probes: ProbeReading[];
 }
+
+export type ProbeReading = {
+  port: number | null;
+  row: TelemetryRow;
+  tank: TankConfig | null;
+};
 
 // logs retention (docs/monitoring-webapp-plan.md §2). A fault older than
 // this has lost its row, and the device has almost certainly rebooted since.
@@ -180,6 +192,9 @@ export function computeOutletMismatches(
   lastLoggedByOutlet: Map<number, LastLoggedOutletState>,
 ): MismatchCheckResult {
   if (recentTelemetry.length < OUTLET_MISMATCH_DEBOUNCE_SAMPLES) return { mismatches: [], checkedOutletIndexes: [] };
+  // A HabiSync 1.0 unit has no outlets: outlet_roles and outlet_mask are
+  // both null, and none of this applies (fleet-handoff-1.3.0 §2).
+  if (isMonitorOnly(device) || device.outlet_roles == null) return { mismatches: [], checkedOutletIndexes: [] };
 
   const debounceWindow = recentTelemetry.slice(0, OUTLET_MISMATCH_DEBOUNCE_SAMPLES);
   const latestSampleMs = new Date(debounceWindow[0].created_at).getTime();
@@ -203,9 +218,9 @@ export function computeOutletMismatches(
     checkedOutletIndexes.push(index);
 
     const { outletState: loggedState } = logged;
-    const actualState = Boolean(debounceWindow[0].outlet_mask & (1 << index));
+    const actualState = Boolean((debounceWindow[0].outlet_mask ?? 0) & (1 << index));
     const allSamplesMismatch = debounceWindow.every(
-      (row) => Boolean(row.outlet_mask & (1 << index)) === actualState && actualState !== loggedState,
+      (row) => Boolean((row.outlet_mask ?? 0) & (1 << index)) === actualState && actualState !== loggedState,
     );
     if (allSamplesMismatch) {
       mismatches.push({ outletIndex: index, role, loggedState, actualState });
@@ -248,6 +263,7 @@ export async function getOutletAttention(
   supabase: SupabaseClient<Database>,
   device: Device,
 ): Promise<OutletAttentionResult> {
+  if (isMonitorOnly(device)) return { mismatches: [], checkedOutletIndexes: [] };
   const [{ data: telemetryRows, error: telemetryError }, { data: eventRows, error: eventsError }] = await Promise.all([
     supabase
       .from('telemetry')
@@ -294,7 +310,7 @@ export async function getOutletAttention(
       let mismatchSince = telemetry[0].created_at;
       let mismatchSinceIsLowerBound = true;
       for (const row of telemetry) {
-        if (Boolean(row.outlet_mask & (1 << mismatch.outletIndex)) !== mismatch.actualState) {
+        if (Boolean((row.outlet_mask ?? 0) & (1 << mismatch.outletIndex)) !== mismatch.actualState) {
           mismatchSinceIsLowerBound = false;
           break;
         }
@@ -369,7 +385,9 @@ export async function getFleetHealth(supabase: SupabaseClient<Database>): Promis
 
   const latestTelemetryByDevice = new Map<string, TelemetryRow>();
   const recentTelemetryByDevice = new Map<string, TelemetryRow[]>();
+  const rowsByDevice = new Map<string, TelemetryRow[]>();
   for (const row of telemetryRows ?? []) {
+    rowsByDevice.set(row.device_id, [...(rowsByDevice.get(row.device_id) ?? []), row]);
     if (!latestTelemetryByDevice.has(row.device_id)) {
       latestTelemetryByDevice.set(row.device_id, row);
     }
@@ -461,5 +479,12 @@ export async function getFleetHealth(supabase: SupabaseClient<Database>): Promis
     isStale: now - new Date(device.last_seen).getTime() > STALE_AFTER_MS,
     activeOutletAlerts: activeAlertsByDevice.get(device.device_id) ?? [],
     activeSensorFaults: sensorFaultsByDevice.get(device.device_id) ?? [],
+    probes: isMonitorOnly(device)
+      ? Array.from(latestPerSeries(rowsByDevice.get(device.device_id) ?? []).entries()).map(([port, row]) => ({
+          port,
+          row,
+          tank: tankForSeries(device.profile_config, port),
+        }))
+      : [],
   }));
 }
