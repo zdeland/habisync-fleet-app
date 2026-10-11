@@ -247,6 +247,61 @@ function ReferenceCell({ values, kind }: { values: number[]; kind: ReferenceKind
   );
 }
 
+const toF = (c: number) => (c * 9) / 5 + 32;
+
+// °C as logged, with the °F the person actually typed in alongside.
+function Temp({ c }: { c: number | null }) {
+  if (c == null || !Number.isFinite(c)) return <span className="text-device-text-tertiary">—</span>;
+  return (
+    <>
+      {c.toFixed(2)} °C <span className="text-device-text-tertiary">({toF(c).toFixed(1)} °F)</span>
+    </>
+  );
+}
+
+function RoundsCard({ report }: { report: ProbeTestReport }) {
+  if (report.rounds.length === 0) return null;
+  return (
+    <Card
+      title="Reference rounds"
+      note="The readings as entered on the unit, one round per row: the thermostat, the IR thermometer on the neutral target, and on each probe's tip (with the probe's own reading at that moment)."
+    >
+      <div className="flex flex-col gap-3">
+        {report.rounds.map((round) => (
+          <div key={`${round.at}-${round.phase}`} className="rounded-lg bg-device-surface px-3 py-2.5 text-sm">
+            <div className="text-device-text-secondary">
+              {formatTime(new Date(round.at).getTime())}
+              {round.phase != null && ` · phase ${round.phase}`}
+            </div>
+            <div className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1 font-mono text-device-text sm:grid-cols-2">
+              <div>
+                <span className="font-sans text-device-text-tertiary">Thermostat </span>
+                <Temp c={round.roomC} />
+                {round.roomHum != null && ` · ${round.roomHum.toFixed(0)} %RH`}
+              </div>
+              <div>
+                <span className="font-sans text-device-text-tertiary">Target (IR) </span>
+                <Temp c={round.targetIrC} />
+              </div>
+              {round.probes.map((probe) => (
+                <div key={probe.port}>
+                  <span className="font-sans text-device-text-tertiary">
+                    {portLabel(probe.port)} tip (IR, {probe.cap}){' '}
+                  </span>
+                  <Temp c={probe.irC} />
+                  {probe.readingC != null && (
+                    <span className="text-device-text-tertiary"> · probe read {probe.readingC.toFixed(2)} °C</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 function ReferenceCard({ report }: { report: ProbeTestReport }) {
   if (report.references.length === 0) {
     return (
@@ -398,6 +453,7 @@ export default function ProbeTestView({
           </Card>
           <OffsetCard report={report} />
           <ReferenceCard report={report} />
+          <RoundsCard report={report} />
         </>
       )}
     </div>

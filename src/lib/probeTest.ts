@@ -133,6 +133,18 @@ export type ReferenceComparison = {
   capped: number[];
 };
 
+// One round of reference readings as the person entered them (the unit
+// takes °F and logs °C). Not part of the script's report, which only shows
+// probe-minus-reference; here so the readings themselves can be seen.
+export type ReferenceRound = {
+  at: string; // sample time of the round's rows
+  phase: number | null;
+  roomC: number | null; // the thermostat's temperature
+  roomHum: number | null; // the thermostat's humidity, if it shows one
+  targetIrC: number | null; // IR on the neutral target (the tape patch)
+  probes: { port: number; cap: string; irC: number; readingC: number | null }[]; // IR on each tip
+};
+
 export type ProbeTestReport = {
   rows: number;
   minutes: number;
@@ -143,6 +155,7 @@ export type ProbeTestReport = {
   capEffects: CapEffect[]; // null = needs minutes both capped and uncapped
   pooledCapEffect: { tempC: number; hum: number } | null;
   references: ReferenceComparison[];
+  rounds: ReferenceRound[]; // oldest first
   // Per minute, for the chart: each probe's temp/hum offset and its cap.
   series: { minute: number; port: number; cap: Cap; tempOffset: number; humOffset: number; settling: boolean }[];
 };
@@ -325,6 +338,30 @@ export function analyzeProbeTest(
     }
   }
 
+  // The rounds as entered: a round's rows are written together and share a
+  // sample time, so group on that (and the phase, in case two land close).
+  const roundsByKey = new Map<string, ReferenceRound>();
+  for (const r of refs) {
+    const f = parseFields(r.message);
+    const at = new Date(sampleTimeMs(r)).toISOString();
+    const phase = f.ph != null ? Number(f.ph) : null;
+    const key = `${at}|${phase}`;
+    const round = roundsByKey.get(key) ?? { at, phase, roomC: null, roomHum: null, targetIrC: null, probes: [] };
+    if (f.kind === 'room') {
+      round.roomC = f.temp_c != null ? Number(f.temp_c) : null;
+      round.roomHum = f.hum != null ? Number(f.hum) : null;
+    } else if (f.kind === 'target') {
+      round.targetIrC = Number(f.ir_c);
+    } else if (f.kind === 'probe') {
+      round.probes.push({ port: Number(f.port), cap: f.cap, irC: Number(f.ir_c), readingC: r.temp_c });
+    }
+    roundsByKey.set(key, round);
+  }
+  const rounds = Array.from(roundsByKey.values()).map((round) => ({
+    ...round,
+    probes: round.probes.sort((a, b) => a.port - b.port),
+  }));
+
   return {
     rows: rows.length,
     minutes: minutes.length,
@@ -335,6 +372,7 @@ export function analyzeProbeTest(
     capEffects,
     pooledCapEffect,
     references,
+    rounds,
     series,
   };
 }

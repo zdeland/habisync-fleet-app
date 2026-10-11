@@ -259,4 +259,16 @@ test('compares probes with the reference rounds at the nearest minute, for this 
   assert.ok(Math.abs(target.uncapped[0] - (roomT + BIAS[1] - 24)) < 1e-9);
   const roomH = report.references.find((r) => r.port === 2 && r.kind === 'roomH')!;
   assert.deepEqual(roomH.uncapped, [5]);
+
+  // The rounds as entered, this session's only.
+  assert.deepEqual(report.rounds, [
+    {
+      at: at(30),
+      phase: 0,
+      roomC: 25,
+      roomHum: 55,
+      targetIrC: 24,
+      probes: [{ port: 0, cap: 'uncapped', irC: 23, readingC: 24.5 }],
+    },
+  ]);
 });
