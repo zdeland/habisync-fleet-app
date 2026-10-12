@@ -1,66 +1,13 @@
 // The probe cap test analysis — src/lib/probeTest.ts, a port of the
-// firmware repo's scripts/probe_test_report.py. The synthetic session has a
-// known bias and cap effect per probe, so the fit must recover them
-// exactly; the naive "capped mean minus uncapped mean" is checked to come
-// out low, which is why the handoff says not to use it.
+// firmware repo's scripts/probe_test_report.py. The synthetic sessions have
+// a known bias and cap effect per probe, unequal on purpose, so the joint
+// fit must recover each cap's own effect; the naive "capped mean minus
+// uncapped mean" is checked to come out wrong, which is why the handoff
+// says not to use it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeProbeTest, isOverdue, parseFields, sessionsFromLogs } from '../src/lib/probeTest';
-import type { LogRow, TelemetryRow } from '../src/lib/types';
-
-const T0 = Date.parse('2026-10-11T22:14:00Z');
-const at = (min: number) => new Date(T0 + min * 60_000).toISOString();
-
-function log(min: number, tag: 'probetest' | 'reference', message: string, temp_c: number | null = null): LogRow {
-  return {
-    id: min * 10 + Math.floor(Math.random() * 10),
-    device_id: 'hs-f0a798',
-    level: 2,
-    tag,
-    message,
-    uptime_ms: 0,
-    device_time: at(min),
-    created_at: at(min),
-    temp_c,
-    hum: null,
-    outlet_index: null,
-    outlet_state: null,
-    outlet_roles: null,
-    profile_config: null,
-  };
-}
-
-const BIAS = [0.3, -0.1, -0.2]; // °C, per port
-const EFFECT = [0.5, 0.8, 0.2]; // °C a cap adds, per port
-const HUM_EFFECT = [-2, -3, -1];
-
-// 4 phases x 60 min: baseline, then the one cap on port 0, 1, 2. The room
-// drifts, which the per-minute group mean must cancel.
-function session(): TelemetryRow[] {
-  const rows: TelemetryRow[] = [];
-  let id = 0;
-  for (let min = 0; min < 240; min++) {
-    const phase = Math.floor(min / 60);
-    const room = 24 + Math.sin(min / 30);
-    for (let port = 0; port < 3; port++) {
-      const capped = phase > 0 && phase - 1 === port;
-      rows.push({
-        id: ++id,
-        device_id: 'hs-f0a798',
-        created_at: at(min),
-        device_time: at(min),
-        port,
-        probe_cap: capped ? 'capped' : 'uncapped',
-        temp_c: room + BIAS[port] + (capped ? EFFECT[port] : 0),
-        hum: 60 + (capped ? HUM_EFFECT[port] : 0),
-        outlet_mask: null,
-        free_heap: 0,
-        rssi: -50,
-      });
-    }
-  }
-  return rows;
-}
+import { analyzeProbeTest, isOverdue, jointFit, parseFields, sessionsFromLogs, sessionWindow } from '../src/lib/probeTest';
+import { BIAS, EFFECT, HUM_EFFECT, T0, at, awkwardSession, log, session } from './fixtures/probeTestSessions';
 
 test('parses key=value fields', () => {
   assert.deepEqual(parseFields('start s=1791756852 dur_min=240 ports=0,1,2 all=0'), {
@@ -111,75 +58,63 @@ test('recovers the cap effect exactly when every cap has the same effect', () =>
   assert.ok(naive < 0.5 - 0.01, `naive ${naive} should undershoot 0.5`);
 });
 
-// A session built to be awkward — unequal cap effects, a final all-capped
-// phase, a drifting room, a probe dropping out, a backlog uploaded under
-// one created_at, reference rounds — and the numbers the firmware repo's
-// scripts/probe_test_report.py printed for exactly these rows (run on
-// 2026-10-11 via a harness that fed it this data instead of Supabase).
-// With unequal effects the method is not exact (port 2 is truly +0.8,
-// port 3 +0.2) — the point here is parity with the script, not truth.
-function awkwardSession(): { telemetry: TelemetryRow[]; logs: LogRow[] } {
-  const iso = (ms: number) => new Date(ms).toISOString();
-  const bias = [0.3, -0.1, -0.2];
-  const effect = [0.5, 0.8, 0.2];
-  const humEffect = [-2, -3, -1];
-  const telemetry: TelemetryRow[] = [];
-  const logs: LogRow[] = [];
-  let id = 0;
-  const addLog = (ms: number, tag: 'probetest' | 'reference', message: string, temp_c: number | null = null, hum: number | null = null) =>
-    logs.push({ ...log(0, tag, message, temp_c), id: ++id, hum, device_time: iso(ms), created_at: iso(ms + 900) });
-  addLog(T0 - 600_000, 'probetest', 'start s=1 dur_min=240 ports=0,1,2 all=1');
-  addLog(T0 - 540_000, 'probetest', 'stop s=1');
-  addLog(T0, 'probetest', 'start s=2 dur_min=300 ports=0,1,2 all=1');
-  for (let min = 0; min < 300; min++) {
-    const phase = Math.floor(min / 60);
-    const t = T0 + min * 60_000 + 8_000;
-    const room = 24 + Math.sin(min / 25) + min * 0.002;
-    const rh = 60 + Math.cos(min / 40) * 3;
-    if (min % 60 === 0 && phase > 0) addLog(t, 'probetest', `caps s=2 phase=${phase} capped=${phase === 4 ? '0,1,2' : phase - 1}`);
-    for (let port = 0; port < 3; port++) {
-      if (port === 2 && min >= 130 && min < 134) continue;
-      const capped = phase === 4 || (phase > 0 && phase - 1 === port);
-      const created = min >= 200 && min < 215 ? T0 + 215 * 60_000 : t + 2_000;
-      telemetry.push({
-        id: ++id,
-        device_id: 'hs-test',
-        created_at: iso(created),
-        device_time: iso(t),
-        port,
-        probe_cap: capped ? 'capped' : 'uncapped',
-        temp_c: Math.round((room + bias[port] + (capped ? effect[port] : 0) + Math.sin(min * 7 + port) * 0.05) * 10) / 10,
-        hum: Math.round((rh + (capped ? humEffect[port] : 0)) * 10) / 10,
-        outlet_mask: null,
-        free_heap: 0,
-        rssi: -50,
-      });
-    }
-    if (min % 60 === 30) {
-      for (let port = 0; port < 3; port++) {
-        const capped = phase === 4 || (phase > 0 && phase - 1 === port);
-        addLog(
-          t + 20_000,
-          'reference',
-          `s=2 ph=${phase} kind=probe port=${port} cap=${capped ? 'capped' : 'uncapped'} ir_c=${(room - 0.6 + port * 0.1).toFixed(2)}`,
-          room + bias[port],
-          rh,
-        );
-      }
-      addLog(t + 20_000, 'reference', `s=2 ph=${phase} kind=target ir_c=${(room - 0.4).toFixed(2)}`);
-      addLog(t + 20_000, 'reference', `s=2 ph=${phase} kind=room temp_c=${(room + 1).toFixed(2)}${phase % 2 ? ` hum=${(rh - 4).toFixed(0)}` : ''}`);
-    }
+test('recovers each cap’s own effect when the caps differ', () => {
+  // EFFECT is +0.5 / +0.8 / +0.2 °C, HUM_EFFECT -2 / -3 / -1 %RH. Fitting
+  // each probe on its own (this view's first version) gave 0.49/0.65/0.35.
+  const report = analyzeProbeTest(session(), [], { since: at(0), until: at(240) }, '1');
+  for (const effect of report.capEffects) {
+    assert.ok(Math.abs(effect.tempC! - EFFECT[effect.port]) < 1e-9, `port ${effect.port} temp ${effect.tempC}`);
+    assert.ok(Math.abs(effect.hum! - HUM_EFFECT[effect.port]) < 1e-9, `port ${effect.port} hum ${effect.hum}`);
   }
-  addLog(T0 + 300 * 60_000 + 30_000, 'probetest', 'end s=2');
-  return { telemetry, logs };
-}
+  // The mean of the probes' effects.
+  assert.ok(Math.abs(report.pooledCapEffect!.tempC - 0.5) < 1e-9);
+  assert.equal(BIAS.length, 3);
+});
 
+test('joint fit: caps only ever moved together come back null; a probe never capped has no effect', () => {
+  const p = (port: number, capped: boolean, temp: number) => ({ port, capped, temp, hum: 50 });
+  // Ports 0 and 1, the only two probes, only ever capped together: only
+  // the difference between their caps shows, not either one.
+  const together = Array.from({ length: 20 }, (_, m) => [p(0, m >= 10, 24 + (m >= 10 ? 1 : 0)), p(1, m >= 10, 24)]);
+  assert.equal(jointFit(together), null);
+  // Add a never-capped third probe and they separate: it anchors the group,
+  // so each capped probe's own shift shows.
+  const anchored = Array.from({ length: 20 }, (_, m) => [p(0, m >= 10, 24 + (m >= 10 ? 1 : 0)), p(1, m >= 10, 24), p(2, false, 24)]);
+  const sep = jointFit(anchored)!;
+  assert.ok(Math.abs(sep.get(0)!.tempC - 1) < 1e-9 && Math.abs(sep.get(1)!.tempC) < 1e-9);
+  // One probe never capped: it's simply not in the result.
+  const one = Array.from({ length: 20 }, (_, m) => [p(0, m >= 10, 24 + (m >= 10 ? 0.5 : 0)), p(2, false, 24)]);
+  const fit = jointFit(one)!;
+  assert.deepEqual(Array.from(fit.keys()), [0]);
+  assert.ok(Math.abs(fit.get(0)!.tempC - 0.5) < 1e-9);
+});
+
+test('a session’s window ends when its time is up, not when Done is pressed', () => {
+  const sessions = sessionsFromLogs([
+    log(0, 'probetest', 'start s=7 dur_min=240 ports=0,1,2 all=0'),
+    log(681, 'probetest', 'end s=7'), // Done pressed 7 h after time ran out
+  ]);
+  assert.deepEqual(sessionWindow(sessions[0], at(900)), { since: at(0), until: at(240) });
+  // Still running: up to now. Stopped early: up to the stop.
+  const open = sessionsFromLogs([log(0, 'probetest', 'start s=8 dur_min=240 ports=0,1 all=0')])[0];
+  assert.equal(sessionWindow(open, at(100)).until, at(100));
+  const stopped = sessionsFromLogs([log(0, 'probetest', 'start s=9 dur_min=240 ports=0,1 all=0'), log(30, 'probetest', 'stop s=9')])[0];
+  assert.equal(sessionWindow(stopped, at(900)).until, at(30));
+});
+
+// fixtures/awkwardSession(): unequal cap effects, a final all-capped phase,
+// a drifting room, rounding, a probe dropping out, a backlog uploaded under
+// one created_at, reference rounds, and the caps left on 30 min past the
+// scheduled end. The numbers are what the firmware repo's
+// scripts/probe_test_report.py printed for exactly these rows (2026-10-12,
+// via a harness that fed it the fixture instead of Supabase), and the cap
+// effects are also the true ones.
 test('matches probe_test_report.py on an awkward session', () => {
   const { telemetry, logs } = awkwardSession();
   const latest = sessionsFromLogs(logs)[0];
   assert.equal(latest.id, '2');
   assert.equal(latest.status, 'finished');
-  const r = analyzeProbeTest(telemetry, logs, { since: latest.startedAt, until: latest.endedAt! }, latest.id);
+  const r = analyzeProbeTest(telemetry, logs, sessionWindow(latest, at(1000)), latest.id);
   assert.deepEqual([r.rows, r.minutes, r.comparedMinutes, r.settlingDropped, r.referenceValues], [896, 300, 300, 70, 25]);
 
   const fmt = (v: number, d: number) => `${v >= 0 ? '+' : ''}${v.toFixed(d)}`;
@@ -208,11 +143,11 @@ test('matches probe_test_report.py on an awkward session', () => {
     r.capEffects.map((e) => [e.port + 1, fmt(e.tempC!, 2), fmt(e.hum!, 1)]),
     [
       [1, '+0.50', '-2.0'],
-      [2, '+0.65', '-2.5'],
-      [3, '+0.34', '-1.5'],
+      [2, '+0.80', '-3.0'],
+      [3, '+0.20', '-1.0'],
     ],
   );
-  assert.deepEqual([fmt(r.pooledCapEffect!.tempC, 2), fmt(r.pooledCapEffect!.hum, 1)], ['+0.49', '-2.0']);
+  assert.deepEqual([fmt(r.pooledCapEffect!.tempC, 2), fmt(r.pooledCapEffect!.hum, 1)], ['+0.50', '-2.0']);
 
   const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
   const cell = (xs: number[], d: number) => (xs.length ? `${fmt(mean(xs), d)} (n=${xs.length})` : '-');

@@ -1265,31 +1265,41 @@ The protocol is the firmware repo's `docs/probe-cap-test.md`; its
 `scripts/probe_test_report.py` is the reference implementation.
 
 `src/lib/probeTest.ts` is a function-for-function port of that script —
-same window (start to `end`/`stop`, or now), same 10-minute settling mask
-(left out of a probe's own results but still counted in that minute's group
-mean and capped fraction), same per-minute grouping by sample time, same
-fit, same nearest-minute reference matching. **Parity is pinned**: on
-2026-10-11 the unmodified script was run, through a harness feeding it rows
-instead of Supabase, on both the live `hs-f0a798` session and a synthetic
-session built to be awkward (unequal effects, an all-capped phase, a probe
-dropping out, a backlog under one `created_at`), and every number matched.
-`test/probeTest.test.ts` carries the synthetic session and the script's
-output for it. Change the maths only together with the script.
+same window (start to the scheduled end, start + `dur_min`, or an earlier
+`stop`, or now), same 10-minute settling mask (left out of a probe's own
+results and of the fit, but still counted in that minute's group mean for
+the offset table), same per-minute grouping by sample time, same joint fit,
+same nearest-minute reference matching. **Parity is pinned**: on 2026-10-12
+the unmodified script was run, through a harness feeding it rows instead of
+Supabase, on a synthetic session built to be awkward (unequal effects, an
+all-capped phase, a probe dropping out, a backlog under one `created_at`,
+the caps left on past the scheduled end), and every number matched — window,
+counts, offsets, cap effects and references.
+`test/fixtures/probeTestSessions.ts` holds that session;
+`test/probeTest.test.ts` carries the script's output for it. Change the
+maths only together with the script.
+
+**The window ends at the scheduled end, not the `end` row.** `end` is
+written when someone presses Done, which on `hs-f0a798`'s first test was 7 h
+after time ran out, with the last cap still on: counting to it credited
+probe 3 with 489 capped minutes instead of about 50.
 
 Sessions pair each `start` with the `end`/`stop` for the same `s`; a `stop`
 is abandoned (usually a restart) and hidden by default; a `start` with
 neither is running, or — an hour past its planned end — stopped reporting.
 
-**A limitation of the method, reported back to the firmware team.** The
-handoff and `probe-cap-test.md` say the fit recovers each probe's cap
-effect "exactly, whatever the schedule". It does only when every probe's
-cap has the **same** effect. The model assumes the group mean moves by
-the probe's own effect times the fraction capped; it actually moves by the
-mean of the *capped probes'* effects. Measured on noise-free data with the
-firmware's own schedule: true effects of 0.5 / 0.8 / 0.2 °C come back as
-0.49 / 0.65 / 0.35 (all-capped phase or not) — pulled toward their mean,
-which is exactly the difference the test exists to find. Fitting every
-probe's effect jointly (offset_i = a_i + Σ_j e_j·(δ_ij − 1/n)·c_j) would be
-exact for any schedule. The view says the fit is exact only for equal
-effects rather than claiming otherwise.
+**The fit is joint (fixed 2026-10-12).** The first version fitted each
+probe on its own, assuming the group mean moves by that probe's effect
+times the fraction capped; it actually moves by the capped probes' own
+effects, so with unequal caps (true 0.5 / 0.8 / 0.2 °C) it returned
+0.49 / 0.65 / 0.35, pulled toward their mean. Reported here, fixed in the
+script and then here: every probe's bias and effect are now solved together
+by least squares on offset[p,m] = bias[p] − mean(bias) + e[p]·c[p,m]
+− mean over the minute's probes of e[q]·c[q,m], which is exact for any
+schedule and any mix of effects (`jointFit()`, tested on the unequal case).
+A probe never capped, or always capped, has no effect reported; probes
+only ever capped together, with no other probe to compare against, come
+back as "can't separate". "Mean of the probes" is the mean of the fitted
+effects. On `hs-f0a798`'s first test the caps were near-equal, so the
+numbers barely moved (+2.37 / +2.33 / +2.39 °C, −6.8 / −6.7 / −6.8 %RH).
 

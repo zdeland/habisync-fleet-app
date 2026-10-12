@@ -132,7 +132,7 @@ function CapEffectCard({ report }: { report: ProbeTestReport }) {
   return (
     <Card
       title="Cap effect"
-      note="What putting the cap on changes in each probe's reading, with the probe's own bias taken out. Positive means warmer or more humid. Fitted per minute against the group, as the firmware's report does — exact when every cap has the same effect, pulled toward the group's average when they differ."
+      note="What putting the cap on changes in each probe's reading, with the probe's own bias taken out. Positive means warmer or more humid. Every probe's bias and cap effect are fitted together, minute by minute against the group, as the firmware's report does — exact even when the caps' effects differ."
     >
       {report.capEffects.length === 0 ? (
         <p className="text-sm text-device-text-secondary">No minutes with two or more probes yet.</p>
@@ -165,7 +165,7 @@ function CapEffectCard({ report }: { report: ProbeTestReport }) {
             ))}
             {report.pooledCapEffect && (
               <tr className="border-t border-white/10">
-                <td className="py-1.5 font-sans font-medium">All probes</td>
+                <td className="py-1.5 font-sans font-medium">Mean of the probes</td>
                 <td className="py-1.5 text-right">{signed(report.pooledCapEffect.tempC, 2)} °C</td>
                 <td className="py-1.5 text-right">{signed(report.pooledCapEffect.hum, 1)} %RH</td>
               </tr>

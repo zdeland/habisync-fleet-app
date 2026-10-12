@@ -23,6 +23,8 @@ export function parseFields(message: string): Record<string, string> {
 
 const firstWord = (message: string) => message.split(' ', 1)[0];
 
+const MINUTE_MS = 60_000;
+
 // ---------------------------------------------------------------------------
 // Sessions, from tag='probetest' rows:
 //   start s=<id> dur_min=<m> ports=<p,..> all=<0|1>
@@ -97,16 +99,23 @@ export function isOverdue(session: ProbeTestSession, nowMs: number): boolean {
   return nowMs > new Date(session.startedAt).getTime() + (session.durationMin + 60) * 60_000;
 }
 
-// The script's --latest window: start to end/stop, or to now while open.
+// The script's --latest window: start to the scheduled end (start +
+// duration), or to an earlier stop, or to now while still running. Not to
+// the end row: that's written when someone presses Done, which can be hours
+// after time ran out, with the last cap still on and the readings outside
+// the test.
 export function sessionWindow(session: ProbeTestSession, nowIso: string): { since: string; until: string } {
-  return { since: session.startedAt, until: session.endedAt ?? nowIso };
+  let untilMs = Date.parse(session.endedAt ?? nowIso);
+  if (session.durationMin != null) {
+    untilMs = Math.min(untilMs, Date.parse(session.startedAt) + session.durationMin * MINUTE_MS);
+  }
+  return { since: session.startedAt, until: new Date(untilMs).toISOString() };
 }
 
 // ---------------------------------------------------------------------------
 // Analysis — probe_test_report.py, function for function.
 
 export const SETTLE_MINUTES = 10;
-const MINUTE_MS = 60_000;
 
 type Cap = string; // 'capped' | 'uncapped' | 'unset'
 
@@ -169,14 +178,81 @@ function sd(xs: number[]): number {
   return Math.sqrt(xs.reduce((a, x) => a + (x - m) ** 2, 0) / (xs.length - 1));
 }
 
-// Least-squares slope of ys on xs, or null when xs don't vary.
-export function slope(xs: number[], ys: number[]): number | null {
-  if (xs.length < 2) return null;
-  const mx = mean(xs);
-  const my = mean(ys);
-  const sxx = xs.reduce((a, x) => a + (x - mx) ** 2, 0);
-  if (sxx < 1e-9) return null;
-  return xs.reduce((a, x, i) => a + (x - mx) * (ys[i] - my), 0) / sxx;
+// Solves a·x = b for each b in bs (Gaussian elimination, partial pivoting);
+// null when a is singular, i.e. the data can't separate the unknowns.
+function solve(a: number[][], bs: number[][]): number[][] | null {
+  const n = a.length;
+  const m = a.map((row, i) => [...row, ...bs.map((b) => b[i])]);
+  const scale = Math.max(1e-300, ...a.flat().map(Math.abs));
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(m[r][col]) > Math.abs(m[piv][col])) piv = r;
+    if (Math.abs(m[piv][col]) < 1e-9 * scale) return null;
+    [m[col], m[piv]] = [m[piv], m[col]];
+    for (let r = 0; r < n; r++) {
+      if (r === col || m[r][col] === 0) continue;
+      const f = m[r][col] / m[col][col];
+      m[r] = m[r].map((x, j) => x - f * m[col][j]);
+    }
+  }
+  return bs.map((_, j) => m.map((row, i) => row[n + j] / m[i][i]));
+}
+
+export type FitPoint = { port: number; capped: boolean; temp: number; hum: number };
+
+// Every probe's bias and cap effect at once — the script's joint_fit(). The
+// model is reading[p,m] = room[m] + bias[p] + effect[p]·capped[p,m];
+// subtracting each minute's mean over its probes removes room[m], leaving
+//   offset[p,m] = bias[p] − mean(bias) + effect[p]·capped[p,m]
+//                 − mean over the minute's probes of effect[q]·capped[q,m]
+// which is linear in the biases and effects, so least squares solves them
+// together — exact whatever the schedule and whatever each cap's own effect.
+// (Fitting each probe on its own, as the first version did, is exact only
+// when every cap has the same effect: while probe A is uncapped and B is
+// capped, A's offset moves by B's effect, not A's.)
+// Returns each port that was both capped and uncapped → its effect, or null
+// when the schedule can't separate them (e.g. probes only capped together).
+export function jointFit(minutes: FitPoint[][]): Map<number, { tempC: number; hum: number }> | null {
+  const ports = Array.from(new Set(minutes.flat().map((p) => p.port))).sort((a, b) => a - b);
+  const everCapped = new Set(minutes.flat().filter((p) => p.capped).map((p) => p.port));
+  const everUncapped = new Set(minutes.flat().filter((p) => !p.capped).map((p) => p.port));
+  const ePorts = ports.filter((p) => everCapped.has(p) && everUncapped.has(p));
+  if (ePorts.length === 0) return null;
+  // A probe always capped (or never) has its cap folded into its bias.
+  const bCol = new Map(ports.map((p, i) => [p, i]));
+  const eCol = new Map(ePorts.map((p, i) => [p, ports.length + i]));
+  const k = ports.length + ePorts.length;
+  const ata = Array.from({ length: k }, () => new Array<number>(k).fill(0));
+  const atyT = new Array<number>(k).fill(0);
+  const atyH = new Array<number>(k).fill(0);
+  const add = (row: number[], yT: number, yH: number) => {
+    const nz = row.map((v, i) => [i, v]).filter(([, v]) => v !== 0);
+    for (const [i, vi] of nz) {
+      atyT[i] += vi * yT;
+      atyH[i] += vi * yH;
+      for (const [j, vj] of nz) ata[i][j] += vi * vj;
+    }
+  };
+  for (const m of minutes) {
+    if (m.length < 2) continue;
+    const meanT = mean(m.map((p) => p.temp));
+    const meanH = mean(m.map((p) => p.hum));
+    for (const p of m) {
+      const row = new Array<number>(k).fill(0);
+      for (const q of m) {
+        const w = (q.port === p.port ? 1 : 0) - 1 / m.length;
+        row[bCol.get(q.port)!] += w;
+        const e = eCol.get(q.port);
+        if (q.capped && e != null) row[e] += w;
+      }
+      add(row, p.temp - meanT, p.hum - meanH);
+    }
+  }
+  // Biases are only known relative to each other: pin their sum to 0.
+  add(new Array<number>(k).fill(0).map((_, i) => (i < ports.length ? 1 : 0)), 0, 0);
+  const sol = solve(ata, [atyT, atyH]);
+  if (!sol) return null;
+  return new Map(ePorts.map((p) => [p, { tempC: sol[0][eCol.get(p)!], hum: sol[1][eCol.get(p)!] }]));
 }
 
 const toMinute = (ms: number) => Math.floor(ms / MINUTE_MS) * MINUTE_MS;
@@ -228,12 +304,12 @@ export function analyzeProbeTest(
 
   // Probe against probe, every minute. Each probe's offset from the group
   // mean (the mean includes the probe itself, and every probe read that
-  // minute, settling or not), and x = (capped ? 1 : 0) - fraction of the
-  // group capped. With bias b and cap effect e, offset = b' + e*x exactly,
-  // so the slope of offset on x is e. Mean-capped minus mean-uncapped
-  // would come out 11% low with one cap rotating through three probes.
+  // minute, settling or not) is the descriptive table and chart; the cap
+  // effect comes from jointFit() over the same minutes, settling
+  // port-minutes left out. Mean-capped minus mean-uncapped would come out
+  // 11% low with one cap rotating through three probes.
   const offsetAcc = new Map<string, { port: number; cap: Cap; t: number[]; h: number[]; rawT: number[]; rawH: number[] }>();
-  const fit = new Map<number, { x: number[]; t: number[]; h: number[] }>();
+  const fitMinutes: FitPoint[][] = [];
   const series: ProbeTestReport['series'] = [];
   let compared = 0;
   for (const minute of minutes) {
@@ -242,7 +318,7 @@ export function analyzeProbeTest(
     compared++;
     const meanT = mean(ports.map((p) => p.temp));
     const meanH = mean(ports.map((p) => p.hum));
-    const frac = ports.filter((p) => p.cap === 'capped').length / ports.length;
+    const counted: FitPoint[] = [];
     for (const p of ports) {
       const dT = p.temp - meanT;
       const dH = p.hum - meanH;
@@ -256,12 +332,9 @@ export function analyzeProbeTest(
       acc.rawT.push(p.temp);
       acc.rawH.push(p.hum);
       offsetAcc.set(key, acc);
-      const f = fit.get(p.port) ?? { x: [], t: [], h: [] };
-      f.x.push((p.cap === 'capped' ? 1 : 0) - frac);
-      f.t.push(dT);
-      f.h.push(dH);
-      fit.set(p.port, f);
+      counted.push({ port: p.port, capped: p.cap === 'capped', temp: p.temp, hum: p.hum });
     }
+    if (counted.length >= 2) fitMinutes.push(counted);
   }
 
   const offsets: OffsetStats[] = Array.from(offsetAcc.values())
@@ -276,27 +349,16 @@ export function analyzeProbeTest(
       humOffset: { mean: mean(a.h), sd: sd(a.h) },
     }));
 
-  const capEffects: CapEffect[] = [];
-  const pooled = { x: [] as number[], t: [] as number[], h: [] as number[] };
-  let fittedPorts = 0;
-  for (const port of Array.from(fit.keys()).sort((a, b) => a - b)) {
-    const f = fit.get(port)!;
-    const eT = slope(f.x, f.t);
-    const eH = slope(f.x, f.h);
-    capEffects.push({ port, tempC: eT, hum: eT == null ? null : eH });
-    if (eT == null) continue;
-    fittedPorts++;
-    // Pooled: each port centred on its own means, so biases stay out.
-    const mx = mean(f.x);
-    const mt = mean(f.t);
-    const mh = mean(f.h);
-    pooled.x.push(...f.x.map((x) => x - mx));
-    pooled.t.push(...f.t.map((t) => t - mt));
-    pooled.h.push(...f.h.map((h) => h - mh));
-  }
-  const pooledT = slope(pooled.x, pooled.t);
-  const pooledH = slope(pooled.x, pooled.h);
-  const pooledCapEffect = pooledT != null && pooledH != null && fit.size > 1 && fittedPorts > 0 ? { tempC: pooledT, hum: pooledH } : null;
+  const effects = jointFit(fitMinutes);
+  const testedPorts = Array.from(new Set(fitMinutes.flat().map((p) => p.port))).sort((a, b) => a - b);
+  const capEffects: CapEffect[] = testedPorts.map((port) => {
+    const e = effects?.get(port);
+    return { port, tempC: e ? e.tempC : null, hum: e ? e.hum : null };
+  });
+  // The mean of the probes' effects, when there's more than one.
+  const fitted = capEffects.filter((e) => e.tempC != null);
+  const pooledCapEffect =
+    fitted.length > 1 ? { tempC: mean(fitted.map((e) => e.tempC!)), hum: mean(fitted.map((e) => e.hum!)) } : null;
 
   // Probe against the reference rounds.
   const vs = new Map<string, number[]>();
